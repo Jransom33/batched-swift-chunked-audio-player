@@ -12,14 +12,27 @@ private func bufferLog(_ message: String) {
 }
 
 // MARK: - Throttled Logging Helper
-private var lastThrottledLog: [String: Date] = [:]
-private func throttledBufferLog(_ message: String, throttleKey: String, throttleInterval: TimeInterval = 1.0) {
-    let now = Date()
-    if let lastLog = lastThrottledLog[throttleKey], now.timeIntervalSince(lastLog) < throttleInterval {
-        return // Skip this log - too soon since last one
+private actor LogThrottler {
+    private var lastLogs: [String: Date] = [:]
+    
+    func shouldLog(key: String, interval: TimeInterval) -> Bool {
+        let now = Date()
+        if let lastLog = lastLogs[key], now.timeIntervalSince(lastLog) < interval {
+            return false
+        }
+        lastLogs[key] = now
+        return true
     }
-    lastThrottledLog[throttleKey] = now
-    bufferLog(message)
+}
+
+private let logThrottler = LogThrottler()
+
+private func throttledBufferLog(_ message: String, throttleKey: String, throttleInterval: TimeInterval = 1.0) {
+    Task {
+        if await logThrottler.shouldLog(key: throttleKey, interval: throttleInterval) {
+            bufferLog(message)
+        }
+    }
 }
 
 final class AudioSynchronizer: Sendable {
