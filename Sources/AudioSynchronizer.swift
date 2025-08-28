@@ -257,8 +257,12 @@ final class AudioSynchronizer: Sendable {
                 if isBuffering { 
                     isBuffering = false 
                     bufferLog("💚 MEDIA REQUEST EXITED BUFFERING - Buffers available, enqueuedAny: \(enqueuedAny)")
-                    // Also try force exit method as backup
-                    forceExitBufferingIfPossible()
+                    
+                    // Check for zombie state when exiting buffering
+                    if !validateSynchronizerState() {
+                        bufferLog("🚨 ZOMBIE STATE ON EXIT - Emergency restart required")
+                        restartAudioPipeline()
+                    }
                 }
             }
 
@@ -393,8 +397,53 @@ final class AudioSynchronizer: Sendable {
             onPlaying()
         } else if enqueuedAny {
             bufferLog("📤 ENQUEUED DATA - But synchronizer already running (rate: \(synchronizer.rate))")
+            // Check if synchronizer is in zombie state
+            if !validateSynchronizerState() {
+                bufferLog("🚨 SYNCHRONIZER ZOMBIE STATE DETECTED - Forcing restart")
+                restartAudioPipeline()
+            }
         } else {
             throttledBufferLog("❌ NO DATA ENQUEUED - No buffers available or renderer not ready", throttleKey: "no_data", throttleInterval: 3.0)
+        }
+    }
+    
+    private func validateSynchronizerState() -> Bool {
+        guard let synchronizer = audioSynchronizer,
+              let renderer = audioRenderer else { return false }
+        
+        // Check if synchronizer is actually playing vs just "running"
+        let isActuallyPlaying = synchronizer.rate > 0 && 
+                               renderer.isReadyForMoreMediaData
+        
+        bufferLog("🔍 SYNCHRONIZER STATE - Rate: \(synchronizer.rate), RendererReady: \(renderer.isReadyForMoreMediaData), ActuallyPlaying: \(isActuallyPlaying)")
+        
+        return isActuallyPlaying
+    }
+    
+    private func restartAudioPipeline() {
+        bufferLog("🚨 EMERGENCY PIPELINE RESTART - Rebuilding synchronizer connection")
+        
+        guard let renderer = audioRenderer,
+              let synchronizer = audioSynchronizer else {
+            bufferLog("❌ RESTART FAILED - Missing renderer or synchronizer")
+            return
+        }
+        
+        // Complete teardown and rebuild
+        synchronizer.setRate(0, time: .zero)
+        renderer.flush()
+        
+        // Force a brief delay to let the system settle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            
+            // Rebuild the synchronizer connection
+            synchronizer.addRenderer(renderer)
+            synchronizer.setRate(desiredRate, time: .zero)
+            
+            bufferLog("✅ PIPELINE RESTART COMPLETE - Synchronizer reconnected")
+            self.isBuffering = false
+            self.onPlaying()
         }
     }
 
