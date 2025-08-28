@@ -36,6 +36,14 @@ private func throttledBufferLog(_ message: String, throttleKey: String, throttle
 }
 
 final class AudioSynchronizer: Sendable {
+    
+    // MARK: - Buffer Thresholds
+    /// Consistent buffer threshold for both initial playback and buffering recovery
+    /// This prevents infinite buffering loops where recovery threshold > initial threshold
+    /// 
+    /// Note: Previously initial=1.5s and recovery=2.0s caused zombie states where
+    /// the buffer reached ~1.49s but couldn't meet the 2.0s recovery requirement
+    private static let bufferThreshold: Double = 1.5
     typealias RateCallback = @Sendable (_ time: Float) -> Void
     typealias TimeCallback = @Sendable (_ time: CMTime) -> Void
     typealias DurationCallback = @Sendable (_ duration: CMTime) -> Void
@@ -319,7 +327,7 @@ final class AudioSynchronizer: Sendable {
         
         let dataComplete = receiveComplete && audioFileStream.parsingComplete
         let hasSufficientSystemData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
-        let initialBufferThreshold: Double = 1.5 // Require 1.5 seconds of buffer before starting
+        let initialBufferThreshold: Double = Self.bufferThreshold // Require consistent buffer before starting
         let hasEnoughBuffer = audioBuffersQueue.duration.seconds >= initialBufferThreshold
         
         // Only start if we have enough buffer OR the stream is complete with any data
@@ -354,9 +362,9 @@ final class AudioSynchronizer: Sendable {
         let currentTime = audioSynchronizer.currentTime().seconds
         let bufferAhead = queueDuration - currentTime
         
-        // MINIMUM BUFFER THRESHOLD: Require at least 2 seconds of buffered audio before resuming
-        // This prevents choppy playback where player alternates between playing a word and buffering
-        let minimumBufferThreshold: Double = 2.0
+        // MINIMUM BUFFER THRESHOLD: Use same threshold as initial playback for consistency
+        // This prevents infinite buffering loops where recovery threshold > initial threshold
+        let minimumBufferThreshold: Double = Self.bufferThreshold
         
         bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s, bufferAhead: \(String(format: "%.2f", bufferAhead))s")
         
@@ -365,10 +373,19 @@ final class AudioSynchronizer: Sendable {
         
         // Only exit buffering if we have sufficient buffer OR the stream is complete
         let isStreamComplete = receiveComplete && (audioFileStream?.parsingComplete == true)
-        let shouldForceExit = (hasBuffers && hasMinimumBuffer) || (isStreamComplete && hasBuffers) || (hasSufficientData && hasMinimumBuffer)
+        
+        // Additional fallback: if we have reasonable buffer and synchronizer hasn't started yet (currentTime ~= 0)
+        // treat the full queue duration as available buffer
+        let isInitialState = currentTime < 0.1 // Player hasn't really started yet
+        let hasReasonableInitialBuffer = isInitialState && queueDuration >= minimumBufferThreshold
+        
+        let shouldForceExit = (hasBuffers && hasMinimumBuffer) || 
+                             (isStreamComplete && hasBuffers) || 
+                             (hasSufficientData && hasMinimumBuffer) ||
+                             (hasReasonableInitialBuffer && hasBuffers)
         
         if shouldForceExit {
-            bufferLog("🚑 FORCING EXIT FROM BUFFERING - Recovery conditions met (minBuffer: \(hasMinimumBuffer), streamComplete: \(isStreamComplete), sufficient: \(hasSufficientData))")
+            bufferLog("🚑 FORCING EXIT FROM BUFFERING - Recovery conditions met (minBuffer: \(hasMinimumBuffer), streamComplete: \(isStreamComplete), sufficient: \(hasSufficientData), initialBuffer: \(hasReasonableInitialBuffer))")
             isBuffering = false
             
             // Force the synchronizer to resume if it's stopped
@@ -385,7 +402,7 @@ final class AudioSynchronizer: Sendable {
                 self.handleMediaDataRequest(renderer: audioRenderer, synchronizer: audioSynchronizer)
             }
         } else {
-            bufferLog("⏳ FORCE EXIT SKIPPED - Insufficient buffer (need \(String(format: "%.1f", minimumBufferThreshold))s, have \(String(format: "%.2f", bufferAhead))s) | buffers: \(hasBuffers), sufficient: \(hasSufficientData), streamComplete: \(isStreamComplete)")
+            bufferLog("⏳ FORCE EXIT SKIPPED - Insufficient buffer (need \(String(format: "%.1f", minimumBufferThreshold))s, have \(String(format: "%.2f", bufferAhead))s) | buffers: \(hasBuffers), sufficient: \(hasSufficientData), streamComplete: \(isStreamComplete), initialBuffer: \(hasReasonableInitialBuffer))")
         }
     }
     
