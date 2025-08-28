@@ -350,7 +350,12 @@ final class AudioSynchronizer: Sendable {
         
         if shouldStart {
             bufferLog("🎯 STARTING PLAYBACK - Conditions met (sufficient: \(hasSufficientSystemData), buffer: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, dataComplete: \(dataComplete))")
-            audioSynchronizer.setRate(desiredRate, time: .zero)
+            // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
+            audioSynchronizer.setRate(1.0, time: .zero)
+            // Allow timebase to stabilize before setting desired rate
+            if desiredRate != 1.0 {
+                audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+            }
             didStart = true
             isBuffering = false
             onPlaying()
@@ -406,7 +411,11 @@ final class AudioSynchronizer: Sendable {
             // Force the synchronizer to resume if it's stopped
             if audioSynchronizer.rate == 0 {
                 bufferLog("🎬 FORCE RESUME - Restarting synchronizer at rate \(desiredRate)")
-                audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
+                audioSynchronizer.setRate(1.0, time: audioSynchronizer.currentTime())
+                if desiredRate != 1.0 {
+                    audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                }
                 onPlaying()
             }
             
@@ -447,7 +456,11 @@ final class AudioSynchronizer: Sendable {
         // If we successfully enqueued data and synchronizer is stopped, start it
         if enqueuedAny && synchronizer.rate == 0 {
             bufferLog("🎬 STARTING PLAYBACK - Enqueued data and synchronizer was stopped")
-            synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
+            // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
+            synchronizer.setRate(1.0, time: synchronizer.currentTime())
+            if desiredRate != 1.0 {
+                synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
+            }
             isBuffering = false
             onPlaying()
         } else if enqueuedAny {
@@ -495,7 +508,11 @@ final class AudioSynchronizer: Sendable {
                 
                 // Rebuild the synchronizer connection
                 synchronizer.addRenderer(renderer)
-                synchronizer.setRate(desiredRate, time: .zero)
+                // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
+                synchronizer.setRate(1.0, time: .zero)
+                if desiredRate != 1.0 {
+                    synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
+                }
                 
                 bufferLog("✅ PIPELINE RESTART COMPLETE - Synchronizer reconnected")
                 self.isBuffering = false
@@ -640,7 +657,11 @@ final class AudioSynchronizer: Sendable {
                     
                     // Resume the synchronizer at the desired rate
                     if let audioSynchronizer = audioSynchronizer {
-                        audioSynchronizer.setRate(desiredRate, time: time)
+                        // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
+                        audioSynchronizer.setRate(1.0, time: time)
+                        if desiredRate != 1.0 {
+                            audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                        }
                         bufferLog("▶️ RESUMED SYNCHRONIZER - Restarting playback at rate \(desiredRate)")
                     }
                     
@@ -695,9 +716,9 @@ final class AudioSynchronizer: Sendable {
         
         // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
         // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
-        // but timebase never starts advancing. Use standard synchronizer methods instead of direct CMTimebase manipulation.
-        synchronizer.setRate(1.0, time: .zero)
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - Set initial rate to 1.0 at time zero")
+        // but timebase never starts advancing. Use setRate with explicit time parameter.
+        synchronizer.setRate(1.0, time: CMTime.zero)
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(1.0, time: CMTime.zero)")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
