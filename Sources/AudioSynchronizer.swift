@@ -119,12 +119,13 @@ final class AudioSynchronizer: Sendable {
 
     func prepare(type: AudioFileTypeID? = nil) {
         invalidate()
+        receiveComplete = false
         audioFileStream = AudioFileStream(type: type, queue: queue) { [weak self] error in
             self?.onError(error)
         } receiveASBD: { [weak self] asbd in
-            self?.onFileStreamDescriptionReceived(asbd: asbd)
+            self?.handleAudioStreamDescription(asbd: asbd)
         } receivePackets: { [weak self] numberOfBytes, bytes, numberOfPackets, packets in
-            self?.onFileStreamPacketsReceived(
+            self?.handleAudioStreamPackets(
                 numberOfBytes: numberOfBytes,
                 bytes: bytes,
                 numberOfPackets: numberOfPackets,
@@ -132,6 +133,27 @@ final class AudioSynchronizer: Sendable {
             )
         }
         audioFileStream?.open()
+        bufferLog("🎵 AUDIO STREAM PREPARED - Ready to receive audio data")
+    }
+    
+    func parseData(_ data: Data) {
+        guard let audioFileStream = audioFileStream else {
+            bufferLog("❌ PARSE DATA FAILED - AudioFileStream not prepared")
+            return
+        }
+        bufferLog("🔄 PARSING \(data.count) bytes of audio data")
+        audioFileStream.parseData(data)
+    }
+    
+    func markReceiveComplete() {
+        receiveComplete = true
+        bufferLog("🏁 MARKED RECEIVE COMPLETE - No more audio data expected")
+        
+        // Force exit buffering if we're waiting and this is the end
+        if isBuffering {
+            bufferLog("🚑 STREAM COMPLETE DURING BUFFERING - Attempting final recovery")
+            forceExitBufferingIfPossible()
+        }
     }
 
     func pause() {
@@ -541,4 +563,48 @@ final class AudioSynchronizer: Sendable {
         audioRendererErrorCancellable?.cancel()
         audioRendererErrorCancellable = nil
     }
+    
+    // MARK: - AudioFileStream Callbacks
+    
+    private func handleAudioStreamDescription(asbd: AudioStreamBasicDescription) {
+        bufferLog("🎧 RECEIVED AUDIO DESCRIPTION - Format: \(asbd.mFormatID), Channels: \(asbd.mChannelsPerFrame), SampleRate: \(asbd.mSampleRate)")
+        audioBuffersQueue = AudioBuffersQueue(audioDescription: asbd)
+    }
+    
+    private func handleAudioStreamPackets(
+        numberOfBytes: UInt32,
+        bytes: UnsafeRawPointer,
+        numberOfPackets: UInt32,
+        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
+    ) {
+        bufferLog("🎧 RECEIVED \(numberOfPackets) PACKETS - \(numberOfBytes) bytes")
+        
+        guard let audioBuffersQueue = self.audioBuffersQueue else {
+            bufferLog("❌ PACKETS DROPPED - No AudioBuffersQueue")
+            return
+        }
+        
+        do {
+            try audioBuffersQueue.enqueue(
+                numberOfBytes: numberOfBytes,
+                bytes: bytes,
+                numberOfPackets: numberOfPackets,
+                packets: packets
+            )
+            
+            bufferLog("✅ ENQUEUED PACKETS - Queue duration: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, isEmpty: \(audioBuffersQueue.isEmpty)")
+            onDurationChanged(audioBuffersQueue.duration)
+            
+            // Force exit buffering if we have new data
+            if isBuffering {
+                bufferLog("🚑 NEW BUFFER ARRIVED DURING BUFFERING - Attempting force exit")
+                forceExitBufferingIfPossible()
+            }
+            
+        } catch {
+            bufferLog("❌ FAILED TO ENQUEUE PACKETS - Error: \(error)")
+            onError(AudioPlayerError.other(error))
+        }
+    }
+
 }
