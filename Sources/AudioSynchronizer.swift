@@ -691,6 +691,13 @@ final class AudioSynchronizer: Sendable {
         renderer.volume = initialVolume
         let synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
+        
+        // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
+        // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
+        // but timebase never starts advancing. Setting rate to 1.0 at time .zero initializes the timebase.
+        synchronizer.setRate(1.0, time: .zero)
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - Set initial rate to 1.0 at time zero")
+        
         audioRenderer = renderer
         audioSynchronizer = synchronizer
         audioBuffersQueue = AudioBuffersQueue(audioDescription: asbd)
