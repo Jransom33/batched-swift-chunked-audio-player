@@ -228,36 +228,7 @@ final class AudioSynchronizer: Sendable {
 
     // MARK: - Private
 
-    private func onFileStreamDescriptionReceived(asbd: AudioStreamBasicDescription) {
-        let renderer = AVSampleBufferAudioRenderer()
-        renderer.volume = initialVolume
-        let synchronizer = AVSampleBufferRenderSynchronizer()
-        synchronizer.addRenderer(renderer)
-        audioRenderer = renderer
-        audioSynchronizer = synchronizer
-        audioBuffersQueue = AudioBuffersQueue(audioDescription: asbd)
-        observeRenderer(renderer, synchronizer: synchronizer)
-        startRequestingMediaData(renderer)
-    }
 
-    private func onFileStreamPacketsReceived(
-        numberOfBytes: UInt32,
-        bytes: UnsafeRawPointer,
-        numberOfPackets: UInt32,
-        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
-    ) {
-        do {
-            guard let audioBuffersQueue else { return }
-            try audioBuffersQueue.enqueue(
-                numberOfBytes: numberOfBytes,
-                bytes: bytes,
-                numberOfPackets: numberOfPackets,
-                packets: packets
-            )
-        } catch {
-            onError(AudioPlayerError(error: error))
-        }
-    }
 
     private func startRequestingMediaData(_ renderer: AVSampleBufferAudioRenderer) {
         nonisolated(unsafe) var didStart = false
@@ -568,7 +539,19 @@ final class AudioSynchronizer: Sendable {
     
     private func handleAudioStreamDescription(asbd: AudioStreamBasicDescription) {
         bufferLog("🎧 RECEIVED AUDIO DESCRIPTION - Format: \(asbd.mFormatID), Channels: \(asbd.mChannelsPerFrame), SampleRate: \(asbd.mSampleRate)")
+        
+        // Create and setup audio renderer and synchronizer
+        let renderer = AVSampleBufferAudioRenderer()
+        renderer.volume = initialVolume
+        let synchronizer = AVSampleBufferRenderSynchronizer()
+        synchronizer.addRenderer(renderer)
+        audioRenderer = renderer
+        audioSynchronizer = synchronizer
         audioBuffersQueue = AudioBuffersQueue(audioDescription: asbd)
+        
+        bufferLog("🎬 AUDIO RENDERER CREATED - Starting media data requests")
+        observeRenderer(renderer, synchronizer: synchronizer)
+        startRequestingMediaData(renderer)
     }
     
     private func handleAudioStreamPackets(
