@@ -529,6 +529,11 @@ final class AudioSynchronizer: Sendable {
                     if !isBuffering {
                         isBuffering = true
                         bufferLog("🌀 ENTERED BUFFERING - Player caught up to buffered content (time: \(String(format: "%.2f", time.seconds))s, buffered: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s)")
+                        
+                        // Pause the synchronizer to stop time advancement during buffering
+                        audioSynchronizer.setRate(0.0, time: time)
+                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopping time advancement during buffering")
+                        
                         onBuffering()
                         
                         // Immediately try to recover - sometimes we have buffer but it's not being detected
@@ -540,12 +545,20 @@ final class AudioSynchronizer: Sendable {
                         throttledBufferLog("🔄 STILL BUFFERING - Attempting force exit (time: \(String(format: "%.2f", time.seconds))s, queue: \(audioBuffersQueue.duration.seconds)s)", throttleKey: "still_buffering", throttleInterval: 3.0)
                         forceExitBufferingIfPossible()
                     }
-                    onTimeChanged(time)
+                    // DON'T update time during buffering - this prevents the UI from showing false progress
+                    // onTimeChanged(time) is intentionally commented out
                 }
             } else {
                 if isBuffering { 
                     isBuffering = false
                     bufferLog("✅ EXITED BUFFERING - Player has available buffer ahead (time: \(String(format: "%.2f", time.seconds))s)")
+                    
+                    // Resume the synchronizer at the desired rate
+                    if let audioSynchronizer = audioSynchronizer {
+                        audioSynchronizer.setRate(desiredRate, time: time)
+                        bufferLog("▶️ RESUMED SYNCHRONIZER - Restarting playback at rate \(desiredRate)")
+                    }
+                    
                     // Force a media data request to ensure playback resumes
                     if let audioRenderer = self.audioRenderer {
                         audioRenderer.requestMediaDataWhenReady(on: queue) {
