@@ -42,9 +42,9 @@ final class AudioSynchronizer: Sendable {
     /// Consistent buffer threshold for both initial playback and buffering recovery
     /// This prevents infinite buffering loops where recovery threshold > initial threshold
     /// 
-    /// Note: Previously initial=1.5s and recovery=2.0s caused zombie states where
-    /// the buffer reached ~1.49s but couldn't meet the 2.0s recovery requirement
-    private static let bufferThreshold: Double = 1.5
+    /// Note: 1.5s was insufficient to prevent choppy word-by-word playback, increased to 2.0s
+    /// to ensure smooth continuous playback without buffering between words
+    private static let bufferThreshold: Double = 2.0
     typealias RateCallback = @Sendable (_ time: Float) -> Void
     typealias TimeCallback = @Sendable (_ time: CMTime) -> Void
     typealias DurationCallback = @Sendable (_ duration: CMTime) -> Void
@@ -695,13 +695,9 @@ final class AudioSynchronizer: Sendable {
         
         // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
         // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
-        // but timebase never starts advancing. We need to directly manipulate the CMTimebase.
-        let timebase = synchronizer.timebase
-        // Step 1: Set the timebase time to zero
-        let status1 = CMTimebaseSetTime(timebase, time: .zero)
-        // Step 2: Set the timebase rate to 1.0 to start it running
-        let status2 = CMTimebaseSetRate(timebase, rate: 1.0)
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - CMTimebaseSetTime: \(status1), CMTimebaseSetRate: \(status2)")
+        // but timebase never starts advancing. Use standard synchronizer methods instead of direct CMTimebase manipulation.
+        synchronizer.setRate(1.0, time: .zero)
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - Set initial rate to 1.0 at time zero")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
