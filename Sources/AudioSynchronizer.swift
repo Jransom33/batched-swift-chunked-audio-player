@@ -312,19 +312,26 @@ final class AudioSynchronizer: Sendable {
         guard let audioRenderer,
               let audioSynchronizer,
               let audioFileStream,
+              let audioBuffersQueue,
               audioSynchronizer.rate == 0,
               !didStart else { return }
+        
         let dataComplete = receiveComplete && audioFileStream.parsingComplete
-        let shouldStart = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart || dataComplete
+        let hasSufficientSystemData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
+        let initialBufferThreshold: Double = 1.5 // Require 1.5 seconds of buffer before starting
+        let hasEnoughBuffer = audioBuffersQueue.duration.seconds >= initialBufferThreshold
+        
+        // Only start if we have enough buffer OR the stream is complete with any data
+        let shouldStart = (hasSufficientSystemData && hasEnoughBuffer) || (dataComplete && !audioBuffersQueue.isEmpty)
         
         if shouldStart {
-            bufferLog("🎯 STARTING PLAYBACK - Sufficient media data available (dataComplete: \(dataComplete))")
+            bufferLog("🎯 STARTING PLAYBACK - Conditions met (sufficient: \(hasSufficientSystemData), buffer: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, dataComplete: \(dataComplete))")
             audioSynchronizer.setRate(desiredRate, time: .zero)
             didStart = true
             isBuffering = false
             onPlaying()
         } else {
-            throttledBufferLog("⏸️ PLAYBACK NOT READY - Insufficient media data (dataComplete: \(dataComplete), hasSufficient: \(audioRenderer.hasSufficientMediaDataForReliablePlaybackStart))", throttleKey: "not_ready", throttleInterval: 2.0)
+            throttledBufferLog("⏸️ PLAYBACK NOT READY - Waiting for \(String(format: "%.1f", initialBufferThreshold))s buffer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, sufficient: \(hasSufficientSystemData), dataComplete: \(dataComplete))", throttleKey: "not_ready", throttleInterval: 2.0)
         }
     }
     
@@ -344,15 +351,23 @@ final class AudioSynchronizer: Sendable {
         let hasSufficientData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
         let queueDuration = audioBuffersQueue.duration.seconds
         let currentTime = audioSynchronizer.currentTime().seconds
+        let bufferAhead = queueDuration - currentTime
         
-        bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s")
+        // MINIMUM BUFFER THRESHOLD: Require at least 2 seconds of buffered audio before resuming
+        // This prevents choppy playback where player alternates between playing a word and buffering
+        let minimumBufferThreshold: Double = 2.0
         
-        // More aggressive exit conditions - even tiny amounts of buffered audio should allow resumption
-        let hasAnyBufferedContent = queueDuration > currentTime + 0.1 // At least 100ms ahead
-        let shouldForceExit = hasBuffers || hasSufficientData || hasAnyBufferedContent
+        bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s, bufferAhead: \(String(format: "%.2f", bufferAhead))s")
+        
+        // Check if we have enough buffered content ahead of current playback position
+        let hasMinimumBuffer = bufferAhead >= minimumBufferThreshold
+        
+        // Only exit buffering if we have sufficient buffer OR the stream is complete
+        let isStreamComplete = receiveComplete && (audioFileStream?.parsingComplete == true)
+        let shouldForceExit = (hasBuffers && hasMinimumBuffer) || (isStreamComplete && hasBuffers) || (hasSufficientData && hasMinimumBuffer)
         
         if shouldForceExit {
-            bufferLog("🚑 FORCING EXIT FROM BUFFERING - Recovery conditions met")
+            bufferLog("🚑 FORCING EXIT FROM BUFFERING - Recovery conditions met (minBuffer: \(hasMinimumBuffer), streamComplete: \(isStreamComplete), sufficient: \(hasSufficientData))")
             isBuffering = false
             
             // Force the synchronizer to resume if it's stopped
@@ -369,7 +384,7 @@ final class AudioSynchronizer: Sendable {
                 self.handleMediaDataRequest(renderer: audioRenderer, synchronizer: audioSynchronizer)
             }
         } else {
-            bufferLog("⏳ FORCE EXIT SKIPPED - No recovery conditions met (buffers: \(hasBuffers), sufficient: \(hasSufficientData), hasContent: \(hasAnyBufferedContent))")
+            bufferLog("⏳ FORCE EXIT SKIPPED - Insufficient buffer (need \(String(format: "%.1f", minimumBufferThreshold))s, have \(String(format: "%.2f", bufferAhead))s) | buffers: \(hasBuffers), sufficient: \(hasSufficientData), streamComplete: \(isStreamComplete)")
         }
     }
     
@@ -510,43 +525,71 @@ final class AudioSynchronizer: Sendable {
             let epsilon = CMTime(value: 1, timescale: 1000) // tiny tolerance (~1 ms) to avoid float/tick jitter
 
             if let audioBuffersQueue,
-               let audioSynchronizer,
-               time + epsilon >= audioBuffersQueue.duration
+               let audioSynchronizer
             {
-                // We caught up to the buffered end. Decide: buffering vs EOF.
-                if self.receiveComplete,
-                   self.audioFileStream?.parsingComplete == true,
-                   audioBuffersQueue.isEmpty
-                {
-                    // True EOF → finish as before.
-                    onTimeChanged(audioBuffersQueue.duration)
-                    audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
-                    onRateChanged(0.0)
-                    onComplete()
-                    invalidate()
-                } else {
-                    // Not EOF → we're temporarily stalled (rebuffering).
-                    if !isBuffering {
+                let currentTime = time.seconds
+                let queueDuration = audioBuffersQueue.duration.seconds
+                let bufferAhead = queueDuration - currentTime
+                let minimumBufferThreshold: Double = 0.5 // Start buffering when less than 500ms ahead
+                
+                // Check if we're running low on buffer OR completely caught up
+                let isRunningLowOnBuffer = bufferAhead <= minimumBufferThreshold
+                let isCaughtUpCompletely = time + epsilon >= audioBuffersQueue.duration
+                
+                if isCaughtUpCompletely {
+                    // We caught up to the buffered end. Decide: buffering vs EOF.
+                    if self.receiveComplete,
+                       self.audioFileStream?.parsingComplete == true,
+                       audioBuffersQueue.isEmpty
+                    {
+                        // True EOF → finish as before.
+                        onTimeChanged(audioBuffersQueue.duration)
+                        audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
+                        onRateChanged(0.0)
+                        onComplete()
+                        invalidate()
+                    } else {
+                        // Not EOF → we're temporarily stalled (rebuffering).
+                        if !isBuffering {
+                            isBuffering = true
+                            bufferLog("🌀 ENTERED BUFFERING - Player caught up to buffered content (time: \(String(format: "%.2f", currentTime))s, buffered: \(String(format: "%.2f", queueDuration))s)")
+                            
+                            // Pause the synchronizer to stop time advancement during buffering
+                            audioSynchronizer.setRate(0.0, time: time)
+                            bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopping time advancement during buffering")
+                            
+                            onBuffering()
+                            
+                            // Immediately try to recover - sometimes we have buffer but it's not being detected
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                                self?.forceExitBufferingIfPossible()
+                            }
+                        } else {
+                            // Already buffering - try force exit if conditions are met
+                            throttledBufferLog("🔄 STILL BUFFERING - Attempting force exit (time: \(String(format: "%.2f", currentTime))s, queue: \(String(format: "%.2f", queueDuration))s)", throttleKey: "still_buffering", throttleInterval: 3.0)
+                            forceExitBufferingIfPossible()
+                        }
+                        // DON'T update time during buffering - this prevents the UI from showing false progress
+                        // onTimeChanged(time) is intentionally commented out
+                    }
+                } else if isRunningLowOnBuffer && !isBuffering {
+                    // Preemptive buffering: Start buffering before we completely run out
+                    let isStreamComplete = receiveComplete && (audioFileStream?.parsingComplete == true)
+                    if !isStreamComplete {
                         isBuffering = true
-                        bufferLog("🌀 ENTERED BUFFERING - Player caught up to buffered content (time: \(String(format: "%.2f", time.seconds))s, buffered: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s)")
+                        bufferLog("⚠️ PREEMPTIVE BUFFERING - Running low on buffer (bufferAhead: \(String(format: "%.2f", bufferAhead))s, threshold: \(String(format: "%.1f", minimumBufferThreshold))s)")
                         
                         // Pause the synchronizer to stop time advancement during buffering
                         audioSynchronizer.setRate(0.0, time: time)
-                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopping time advancement during buffering")
+                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Preemptive pause to avoid stutter")
                         
                         onBuffering()
                         
-                        // Immediately try to recover - sometimes we have buffer but it's not being detected
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        // Try to recover after a brief delay
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                             self?.forceExitBufferingIfPossible()
                         }
-                    } else {
-                        // Already buffering - try force exit if conditions are met
-                        throttledBufferLog("🔄 STILL BUFFERING - Attempting force exit (time: \(String(format: "%.2f", time.seconds))s, queue: \(audioBuffersQueue.duration.seconds)s)", throttleKey: "still_buffering", throttleInterval: 3.0)
-                        forceExitBufferingIfPossible()
                     }
-                    // DON'T update time during buffering - this prevents the UI from showing false progress
-                    // onTimeChanged(time) is intentionally commented out
                 }
             } else {
                 if isBuffering { 
