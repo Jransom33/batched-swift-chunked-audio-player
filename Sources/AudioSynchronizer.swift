@@ -1,6 +1,7 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import AudioToolbox
 import Combine
+import CoreMedia
 import Foundation
 
 // MARK: - Buffering Logging Helper
@@ -694,9 +695,13 @@ final class AudioSynchronizer: Sendable {
         
         // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
         // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
-        // but timebase never starts advancing. Setting rate to 1.0 at time .zero initializes the timebase.
-        synchronizer.setRate(1.0, time: .zero)
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - Set initial rate to 1.0 at time zero")
+        // but timebase never starts advancing. We need to directly manipulate the CMTimebase.
+        let timebase = synchronizer.timebase
+        // Step 1: Set the timebase time to zero
+        let status1 = CMTimebaseSetTime(timebase, time: .zero)
+        // Step 2: Set the timebase rate to 1.0 to start it running
+        let status2 = CMTimebaseSetRate(timebase, rate: 1.0)
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - CMTimebaseSetTime: \(status1), CMTimebaseSetRate: \(status2)")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
