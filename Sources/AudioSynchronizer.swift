@@ -243,12 +243,19 @@ final class AudioSynchronizer: Sendable {
         renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
             guard let self, let audioRenderer, let audioBuffersQueue else { return }
             var enqueuedAny = false
-            while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
-                audioRenderer.enqueue(buffer)
-                audioBuffersQueue.removeFirst()
-                onDurationChanged(audioBuffersQueue.duration)
-                enqueuedAny = true
-                startPlaybackIfNeeded(didStart: &didStart)
+            // Only feed buffers to renderer if synchronizer is actually playing or we have sufficient buffer
+            let shouldFeedRenderer = audioSynchronizer?.rate != 0 || audioBuffersQueue.duration.seconds >= Self.bufferThreshold
+            
+            if shouldFeedRenderer {
+                while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
+                    audioRenderer.enqueue(buffer)
+                    audioBuffersQueue.removeFirst()
+                    onDurationChanged(audioBuffersQueue.duration)
+                    enqueuedAny = true
+                    startPlaybackIfNeeded(didStart: &didStart)
+                }
+            } else {
+                bufferLog("⏳ HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)")
             }
             startPlaybackIfNeeded(didStart: &didStart)
 
@@ -284,11 +291,18 @@ final class AudioSynchronizer: Sendable {
         renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
             guard let self, let audioRenderer, let audioSynchronizer, let audioBuffersQueue else { return }
             var enqueuedAny = false
-            while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
-                audioRenderer.enqueue(buffer)
-                audioBuffersQueue.removeFirst()
-                onDurationChanged(audioBuffersQueue.duration)
-                enqueuedAny = true
+            // Only feed buffers to renderer if synchronizer is actually playing or we have sufficient buffer
+            let shouldFeedRenderer = audioSynchronizer.rate != 0 || audioBuffersQueue.duration.seconds >= Self.bufferThreshold
+            
+            if shouldFeedRenderer {
+                while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
+                    audioRenderer.enqueue(buffer)
+                    audioBuffersQueue.removeFirst()
+                    onDurationChanged(audioBuffersQueue.duration)
+                    enqueuedAny = true
+                }
+            } else {
+                bufferLog("⏳ RESTART HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)")
             }
             if !didStart {
                 audioSynchronizer.setRate(rate, time: time)
@@ -415,11 +429,18 @@ final class AudioSynchronizer: Sendable {
         throttledBufferLog("🔄 HANDLING MEDIA DATA REQUEST - Queue size: \(audioBuffersQueue.isEmpty ? 0 : 1), isReady: \(renderer.isReadyForMoreMediaData)", throttleKey: "media_request", throttleInterval: 2.0)
         
         var enqueuedAny = false
-        while let buffer = audioBuffersQueue.peek(), renderer.isReadyForMoreMediaData {
-            renderer.enqueue(buffer)
-            audioBuffersQueue.removeFirst()
-            onDurationChanged(audioBuffersQueue.duration)
-            enqueuedAny = true
+        // Only feed buffers to renderer if synchronizer is actually playing or we have sufficient buffer
+        let shouldFeedRenderer = audioSynchronizer?.rate != 0 || audioBuffersQueue.duration.seconds >= Self.bufferThreshold
+        
+        if shouldFeedRenderer {
+            while let buffer = audioBuffersQueue.peek(), renderer.isReadyForMoreMediaData {
+                renderer.enqueue(buffer)
+                audioBuffersQueue.removeFirst()
+                onDurationChanged(audioBuffersQueue.duration)
+                enqueuedAny = true
+            }
+        } else {
+            bufferLog("⏳ HANDLE HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)")
         }
         
         // If we successfully enqueued data and synchronizer is stopped, start it
