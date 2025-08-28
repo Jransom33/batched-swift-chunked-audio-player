@@ -258,11 +258,12 @@ final class AudioSynchronizer: Sendable {
                     isBuffering = false 
                     bufferLog("💚 MEDIA REQUEST EXITED BUFFERING - Buffers available, enqueuedAny: \(enqueuedAny)")
                     
-                    // Check for zombie state when exiting buffering
-                    if !validateSynchronizerState() {
-                        bufferLog("🚨 ZOMBIE STATE ON EXIT - Emergency restart required")
-                        restartAudioPipeline()
-                    }
+                    // NOTE: Disabled zombie state detection as it was causing crashes
+                    // The regular buffering logic with minimum thresholds should handle recovery
+                    // if !validateSynchronizerState() {
+                    //     bufferLog("🚨 ZOMBIE STATE ON EXIT - Emergency restart required")
+                    //     restartAudioPipeline()
+                    // }
                 }
             }
 
@@ -411,12 +412,9 @@ final class AudioSynchronizer: Sendable {
             isBuffering = false
             onPlaying()
         } else if enqueuedAny {
-            bufferLog("📤 ENQUEUED DATA - But synchronizer already running (rate: \(synchronizer.rate))")
-            // Check if synchronizer is in zombie state
-            if !validateSynchronizerState() {
-                bufferLog("🚨 SYNCHRONIZER ZOMBIE STATE DETECTED - Forcing restart")
-                restartAudioPipeline()
-            }
+            bufferLog("📤 ENQUEUED DATA - Synchronizer running at rate: \(synchronizer.rate)")
+            // NOTE: Disabled zombie state check to prevent crashes
+            // The buffering logic with minimum thresholds should handle playback issues
         } else {
             throttledBufferLog("❌ NO DATA ENQUEUED - No buffers available or renderer not ready", throttleKey: "no_data", throttleInterval: 3.0)
         }
@@ -444,21 +442,26 @@ final class AudioSynchronizer: Sendable {
             return
         }
         
-        // Complete teardown and rebuild
+        // Complete teardown
         synchronizer.setRate(0, time: .zero)
         renderer.flush()
         
-        // Force a brief delay to let the system settle
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        // Remove renderer first to avoid "Cannot add renderer more than once" crash
+        synchronizer.removeRenderer(renderer, at: .zero) { [weak self] _ in
             guard let self else { return }
             
-            // Rebuild the synchronizer connection
-            synchronizer.addRenderer(renderer)
-            synchronizer.setRate(desiredRate, time: .zero)
-            
-            bufferLog("✅ PIPELINE RESTART COMPLETE - Synchronizer reconnected")
-            self.isBuffering = false
-            self.onPlaying()
+            // Force a brief delay to let the system settle
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self else { return }
+                
+                // Rebuild the synchronizer connection
+                synchronizer.addRenderer(renderer)
+                synchronizer.setRate(desiredRate, time: .zero)
+                
+                bufferLog("✅ PIPELINE RESTART COMPLETE - Synchronizer reconnected")
+                self.isBuffering = false
+                self.onPlaying()
+            }
         }
     }
 
