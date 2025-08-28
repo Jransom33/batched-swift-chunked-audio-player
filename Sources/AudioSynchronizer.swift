@@ -224,7 +224,11 @@ final class AudioSynchronizer: Sendable {
             {
                 if !isBuffering { isBuffering = true; onBuffering() }
             } else {
-                if isBuffering { isBuffering = false }
+                if isBuffering { 
+                    isBuffering = false 
+                    // Also try force exit method as backup
+                    forceExitBufferingIfPossible()
+                }
             }
 
             stopRequestingMediaDataIfNeeded()
@@ -253,7 +257,11 @@ final class AudioSynchronizer: Sendable {
             {
                 if !isBuffering { isBuffering = true; onBuffering() }
             } else {
-                if isBuffering { isBuffering = false }
+                if isBuffering { 
+                    isBuffering = false 
+                    // Also try force exit method as backup
+                    forceExitBufferingIfPossible()
+                }
             }
 
             stopRequestingMediaDataIfNeeded()
@@ -273,6 +281,48 @@ final class AudioSynchronizer: Sendable {
         didStart = true
         isBuffering = false
         onPlaying()
+    }
+    
+    private func forceExitBufferingIfPossible() {
+        guard isBuffering,
+              let audioRenderer = self.audioRenderer,
+              let audioSynchronizer = self.audioSynchronizer,
+              let audioBuffersQueue = self.audioBuffersQueue else { return }
+        
+        // Check if we have any buffers available or sufficient media data
+        let hasBuffers = !audioBuffersQueue.isEmpty
+        let hasSufficientData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
+        
+        if hasBuffers || hasSufficientData {
+            print("🚑 [FORCE_EXIT_BUFFERING] Forcing exit from buffering - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData)")
+            isBuffering = false
+            
+            // Restart media data requests
+            audioRenderer.requestMediaDataWhenReady(on: queue) { [weak self] in
+                guard let self else { return }
+                // This will re-trigger the normal media request logic
+                self.handleMediaDataRequest(renderer: audioRenderer, synchronizer: audioSynchronizer)
+            }
+        }
+    }
+    
+    private func handleMediaDataRequest(renderer: AVSampleBufferAudioRenderer, synchronizer: AVSampleBufferRenderSynchronizer) {
+        guard let audioBuffersQueue = self.audioBuffersQueue else { return }
+        
+        var enqueuedAny = false
+        while let buffer = audioBuffersQueue.peek(), renderer.isReadyForMoreMediaData {
+            renderer.enqueue(buffer)
+            audioBuffersQueue.removeFirst()
+            onDurationChanged(audioBuffersQueue.duration)
+            enqueuedAny = true
+        }
+        
+        // If we successfully enqueued data and synchronizer is stopped, start it
+        if enqueuedAny && synchronizer.rate == 0 {
+            synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
+            isBuffering = false
+            onPlaying()
+        }
     }
 
     private func stopRequestingMediaDataIfNeeded() {
@@ -357,11 +407,22 @@ final class AudioSynchronizer: Sendable {
                     if !isBuffering {
                         isBuffering = true
                         onBuffering()
+                    } else {
+                        // Already buffering - try force exit if conditions are met
+                        forceExitBufferingIfPossible()
                     }
                     onTimeChanged(time)
                 }
             } else {
-                if isBuffering { isBuffering = false } // exited stall
+                if isBuffering { 
+                    isBuffering = false
+                    // Force a media data request to ensure playback resumes
+                    if let audioRenderer = self.audioRenderer {
+                        audioRenderer.requestMediaDataWhenReady(on: queue) {
+                            // This will trigger the existing media request logic
+                        }
+                    }
+                }
                 onTimeChanged(time)
             }
         }
