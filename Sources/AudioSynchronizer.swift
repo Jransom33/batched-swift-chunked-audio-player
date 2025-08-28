@@ -11,6 +11,17 @@ private func bufferLog(_ message: String) {
     print("👻👻👻 [\(timestamp)] [BUFFER] \(message)")
 }
 
+// MARK: - Throttled Logging Helper
+private var lastThrottledLog: [String: Date] = [:]
+private func throttledBufferLog(_ message: String, throttleKey: String, throttleInterval: TimeInterval = 1.0) {
+    let now = Date()
+    if let lastLog = lastThrottledLog[throttleKey], now.timeIntervalSince(lastLog) < throttleInterval {
+        return // Skip this log - too soon since last one
+    }
+    lastThrottledLog[throttleKey] = now
+    bufferLog(message)
+}
+
 final class AudioSynchronizer: Sendable {
     typealias RateCallback = @Sendable (_ time: Float) -> Void
     typealias TimeCallback = @Sendable (_ time: CMTime) -> Void
@@ -303,7 +314,7 @@ final class AudioSynchronizer: Sendable {
             isBuffering = false
             onPlaying()
         } else {
-            bufferLog("⏸️ PLAYBACK NOT READY - Insufficient media data (dataComplete: \(dataComplete), hasSufficient: \(audioRenderer.hasSufficientMediaDataForReliablePlaybackStart))")
+            throttledBufferLog("⏸️ PLAYBACK NOT READY - Insufficient media data (dataComplete: \(dataComplete), hasSufficient: \(audioRenderer.hasSufficientMediaDataForReliablePlaybackStart))", throttleKey: "not_ready", throttleInterval: 2.0)
         }
     }
     
@@ -321,21 +332,34 @@ final class AudioSynchronizer: Sendable {
         // Check if we have any buffers available or sufficient media data
         let hasBuffers = !audioBuffersQueue.isEmpty
         let hasSufficientData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
+        let queueDuration = audioBuffersQueue.duration.seconds
+        let currentTime = audioSynchronizer.currentTime().seconds
         
-        bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData)")
+        bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s")
         
-        if hasBuffers || hasSufficientData {
+        // More aggressive exit conditions - even tiny amounts of buffered audio should allow resumption
+        let hasAnyBufferedContent = queueDuration > currentTime + 0.1 // At least 100ms ahead
+        let shouldForceExit = hasBuffers || hasSufficientData || hasAnyBufferedContent
+        
+        if shouldForceExit {
             bufferLog("🚑 FORCING EXIT FROM BUFFERING - Recovery conditions met")
             isBuffering = false
             
-            // Restart media data requests
+            // Force the synchronizer to resume if it's stopped
+            if audioSynchronizer.rate == 0 {
+                bufferLog("🎬 FORCE RESUME - Restarting synchronizer at rate \(desiredRate)")
+                audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                onPlaying()
+            }
+            
+            // Restart media data requests immediately
             audioRenderer.requestMediaDataWhenReady(on: queue) { [weak self] in
                 guard let self else { return }
                 // This will re-trigger the normal media request logic
                 self.handleMediaDataRequest(renderer: audioRenderer, synchronizer: audioSynchronizer)
             }
         } else {
-            bufferLog("⏳ FORCE EXIT SKIPPED - Insufficient conditions for recovery")
+            bufferLog("⏳ FORCE EXIT SKIPPED - No recovery conditions met (buffers: \(hasBuffers), sufficient: \(hasSufficientData), hasContent: \(hasAnyBufferedContent))")
         }
     }
     
@@ -345,7 +369,7 @@ final class AudioSynchronizer: Sendable {
             return 
         }
         
-        bufferLog("🔄 HANDLING MEDIA DATA REQUEST - Queue size: \(audioBuffersQueue.isEmpty ? 0 : 1), isReady: \(renderer.isReadyForMoreMediaData)")
+        throttledBufferLog("🔄 HANDLING MEDIA DATA REQUEST - Queue size: \(audioBuffersQueue.isEmpty ? 0 : 1), isReady: \(renderer.isReadyForMoreMediaData)", throttleKey: "media_request", throttleInterval: 2.0)
         
         var enqueuedAny = false
         while let buffer = audioBuffersQueue.peek(), renderer.isReadyForMoreMediaData {
@@ -364,7 +388,7 @@ final class AudioSynchronizer: Sendable {
         } else if enqueuedAny {
             bufferLog("📤 ENQUEUED DATA - But synchronizer already running (rate: \(synchronizer.rate))")
         } else {
-            bufferLog("❌ NO DATA ENQUEUED - No buffers available or renderer not ready")
+            throttledBufferLog("❌ NO DATA ENQUEUED - No buffers available or renderer not ready", throttleKey: "no_data", throttleInterval: 3.0)
         }
     }
 
@@ -451,9 +475,14 @@ final class AudioSynchronizer: Sendable {
                         isBuffering = true
                         bufferLog("🌀 ENTERED BUFFERING - Player caught up to buffered content (time: \(String(format: "%.2f", time.seconds))s, buffered: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s)")
                         onBuffering()
+                        
+                        // Immediately try to recover - sometimes we have buffer but it's not being detected
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                            self?.forceExitBufferingIfPossible()
+                        }
                     } else {
                         // Already buffering - try force exit if conditions are met
-                        bufferLog("🔄 STILL BUFFERING - Attempting force exit (time: \(String(format: "%.2f", time.seconds))s)")
+                        throttledBufferLog("🔄 STILL BUFFERING - Attempting force exit (time: \(String(format: "%.2f", time.seconds))s, queue: \(audioBuffersQueue.duration.seconds)s)", throttleKey: "still_buffering", throttleInterval: 3.0)
                         forceExitBufferingIfPossible()
                     }
                     onTimeChanged(time)
