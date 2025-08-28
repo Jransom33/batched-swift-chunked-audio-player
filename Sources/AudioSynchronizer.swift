@@ -11,6 +11,7 @@ final class AudioSynchronizer: Sendable {
     typealias PlayingCallback = @Sendable () -> Void
     typealias PausedCallback = @Sendable () -> Void
     typealias SampleBufferCallback = @Sendable (CMSampleBuffer?) -> Void
+    typealias BufferingCallback = @Sendable () -> Void
 
     private let queue = DispatchQueue(label: "audio.player.queue")
     private let onRateChanged: RateCallback
@@ -21,6 +22,7 @@ final class AudioSynchronizer: Sendable {
     private let onPlaying: PlayingCallback
     private let onPaused: PausedCallback
     private let onSampleBufferChanged: SampleBufferCallback
+    private let onBuffering: BufferingCallback
     private let timeUpdateInterval: CMTime
     private let initialVolume: Float
 
@@ -30,6 +32,7 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var audioRenderer: AVSampleBufferAudioRenderer?
     private nonisolated(unsafe) var audioSynchronizer: AVSampleBufferRenderSynchronizer?
     private nonisolated(unsafe) var currentSampleBufferTime: CMTime?
+    private nonisolated(unsafe) var isBuffering = false
 
     private nonisolated(unsafe) var audioRendererErrorCancellable: AnyCancellable?
     private nonisolated(unsafe) var audioRendererRateCancellable: AnyCancellable?
@@ -65,7 +68,8 @@ final class AudioSynchronizer: Sendable {
         onComplete: @escaping CompleteCallback = {},
         onPlaying: @escaping PlayingCallback = {},
         onPaused: @escaping PausedCallback = {},
-        onSampleBufferChanged: @escaping SampleBufferCallback = { _ in }
+        onSampleBufferChanged: @escaping SampleBufferCallback = { _ in },
+        onBuffering: @escaping BufferingCallback = {}
     ) {
         self.timeUpdateInterval = timeUpdateInterval
         self.initialVolume = initialVolume
@@ -77,6 +81,7 @@ final class AudioSynchronizer: Sendable {
         self.onPlaying = onPlaying
         self.onPaused = onPaused
         self.onSampleBufferChanged = onSampleBufferChanged
+        self.onBuffering = onBuffering
     }
 
     func prepare(type: AudioFileTypeID? = nil) {
@@ -203,13 +208,25 @@ final class AudioSynchronizer: Sendable {
         nonisolated(unsafe) var didStart = false
         renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
             guard let self, let audioRenderer, let audioBuffersQueue else { return }
+            var enqueuedAny = false
             while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
                 audioRenderer.enqueue(buffer)
                 audioBuffersQueue.removeFirst()
                 onDurationChanged(audioBuffersQueue.duration)
+                enqueuedAny = true
                 startPlaybackIfNeeded(didStart: &didStart)
             }
             startPlaybackIfNeeded(didStart: &didStart)
+
+            if !enqueuedAny,
+               audioRenderer.isReadyForMoreMediaData,
+               !(receiveComplete && (audioFileStream?.parsingComplete == true))
+            {
+                if !isBuffering { isBuffering = true; onBuffering() }
+            } else {
+                if isBuffering { isBuffering = false }
+            }
+
             stopRequestingMediaDataIfNeeded()
         }
     }
@@ -218,15 +235,27 @@ final class AudioSynchronizer: Sendable {
         nonisolated(unsafe) var didStart = false
         renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
             guard let self, let audioRenderer, let audioSynchronizer, let audioBuffersQueue else { return }
+            var enqueuedAny = false
             while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
                 audioRenderer.enqueue(buffer)
                 audioBuffersQueue.removeFirst()
                 onDurationChanged(audioBuffersQueue.duration)
+                enqueuedAny = true
             }
             if !didStart {
                 audioSynchronizer.setRate(rate, time: time)
                 didStart = true
             }
+
+            if !enqueuedAny,
+               audioRenderer.isReadyForMoreMediaData,
+               !(receiveComplete && (audioFileStream?.parsingComplete == true))
+            {
+                if !isBuffering { isBuffering = true; onBuffering() }
+            } else {
+                if isBuffering { isBuffering = false }
+            }
+
             stopRequestingMediaDataIfNeeded()
         }
     }
@@ -242,12 +271,16 @@ final class AudioSynchronizer: Sendable {
         guard shouldStart else { return }
         audioSynchronizer.setRate(desiredRate, time: .zero)
         didStart = true
+        isBuffering = false
         onPlaying()
     }
 
     private func stopRequestingMediaDataIfNeeded() {
         guard let audioRenderer, let audioBuffersQueue, let audioFileStream else { return }
-        if audioBuffersQueue.isEmpty && receiveComplete && audioFileStream.parsingComplete {
+        if audioBuffersQueue.isEmpty,
+           receiveComplete,
+           audioFileStream.parsingComplete
+        {
             audioRenderer.stopRequestingMediaData()
         }
     }
@@ -301,13 +334,34 @@ final class AudioSynchronizer: Sendable {
         ).sink { [weak self] time in
             guard let self else { return }
             updateCurrentBufferIfNeeded(at: time)
-            if let audioBuffersQueue, let audioSynchronizer, time >= audioBuffersQueue.duration {
-                onTimeChanged(audioBuffersQueue.duration)
-                audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
-                onRateChanged(0.0)
-                onComplete()
-                invalidate()
+
+            let epsilon = CMTime(value: 1, timescale: 1000) // tiny tolerance (~1 ms) to avoid float/tick jitter
+
+            if let audioBuffersQueue,
+               let audioSynchronizer,
+               time + epsilon >= audioBuffersQueue.duration
+            {
+                // We caught up to the buffered end. Decide: buffering vs EOF.
+                if self.receiveComplete,
+                   self.audioFileStream?.parsingComplete == true,
+                   audioBuffersQueue.isEmpty
+                {
+                    // True EOF → finish as before.
+                    onTimeChanged(audioBuffersQueue.duration)
+                    audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
+                    onRateChanged(0.0)
+                    onComplete()
+                    invalidate()
+                } else {
+                    // Not EOF → we're temporarily stalled (rebuffering).
+                    if !isBuffering {
+                        isBuffering = true
+                        onBuffering()
+                    }
+                    onTimeChanged(time)
+                }
             } else {
+                if isBuffering { isBuffering = false } // exited stall
                 onTimeChanged(time)
             }
         }

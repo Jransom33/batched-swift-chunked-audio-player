@@ -180,6 +180,12 @@ public final class AudioPlayer: ObservableObject, Sendable {
                     self?.setCurrentBuffer(buffer)
                 }
             }
+        } onBuffering: { [weak self] in
+            Task {
+                await MainActor.run { [weak self] in
+                    self?.setCurrentState(.buffering)
+                }
+            }
         }
         synchronizer?.prepare(type: type)
     }
