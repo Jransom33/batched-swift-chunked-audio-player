@@ -651,6 +651,9 @@ final class AudioSynchronizer: Sendable {
                             self?.forceExitBufferingIfPossible()
                         }
                     }
+                } else {
+                    // Normal playback path: update time continuously
+                    onTimeChanged(time)
                 }
             } else {
                 if isBuffering { 
