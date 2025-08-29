@@ -614,8 +614,9 @@ final class AudioSynchronizer: Sendable {
                             bufferLog("🌀 ENTERED BUFFERING - Player caught up to buffered content (time: \(String(format: "%.2f", currentTime))s, buffered: \(String(format: "%.2f", queueDuration))s)")
                             
                             // Pause the synchronizer to stop time advancement during buffering
-                            audioSynchronizer.setRate(0.0, time: time)
-                            bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopping time advancement during buffering")
+                            // CRITICAL FIX: Reset timebase to zero to prevent it from racing ahead
+                            audioSynchronizer.setRate(0.0, time: .zero)
+                            bufferLog("⏸️ PAUSED SYNCHRONIZER - Reset timebase to zero during buffering")
                             
                             onBuffering()
                             
@@ -639,8 +640,9 @@ final class AudioSynchronizer: Sendable {
                         bufferLog("⚠️ PREEMPTIVE BUFFERING - Running low on buffer (bufferAhead: \(String(format: "%.2f", bufferAhead))s, threshold: \(String(format: "%.1f", minimumBufferThreshold))s)")
                         
                         // Pause the synchronizer to stop time advancement during buffering
-                        audioSynchronizer.setRate(0.0, time: time)
-                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Preemptive pause to avoid stutter")
+                        // CRITICAL FIX: Reset timebase to zero to prevent it from racing ahead
+                        audioSynchronizer.setRate(0.0, time: .zero)
+                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Reset timebase to zero preemptively")
                         
                         onBuffering()
                         
@@ -657,12 +659,12 @@ final class AudioSynchronizer: Sendable {
                     
                     // Resume the synchronizer at the desired rate
                     if let audioSynchronizer = audioSynchronizer {
-                        // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
-                        audioSynchronizer.setRate(1.0, time: time)
+                        // CRITICAL FIX: Start at 1.0x rate from zero to establish stable timebase, then set desired rate
+                        audioSynchronizer.setRate(1.0, time: .zero)
                         if desiredRate != 1.0 {
                             audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
                         }
-                        bufferLog("▶️ RESUMED SYNCHRONIZER - Restarting playback at rate \(desiredRate)")
+                        bufferLog("▶️ RESUMED SYNCHRONIZER - Restarting playback from zero at rate \(desiredRate)")
                     }
                     
                     // Force a media data request to ensure playback resumes
@@ -717,8 +719,14 @@ final class AudioSynchronizer: Sendable {
         // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
         // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
         // but timebase never starts advancing. Use setRate with explicit time parameter.
-        synchronizer.setRate(1.0, time: CMTime.zero)
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(1.0, time: CMTime.zero)")
+        
+        // Set initial timebase to zero to ensure proper initialization
+        synchronizer.setTime(.zero)
+        
+        // Start with 1.0x rate to establish stable timebase
+        synchronizer.setRate(1.0, time: .zero)
+        
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setTime(.zero) + setRate(1.0, time: .zero)")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
