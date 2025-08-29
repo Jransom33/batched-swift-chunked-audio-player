@@ -7,6 +7,7 @@ import AudioToolbox
 public final class AudioPlayer: ObservableObject, Sendable {
     private let timeUpdateInterval: CMTime
     private let initialVolume: Float
+    private let preferredInitialRate: Float
     private nonisolated(unsafe) var task: Task<Void, Never>?
     private nonisolated(unsafe) var synchronizer: AudioSynchronizer?
     private let didStartPlaying: @Sendable () -> Void
@@ -38,12 +39,14 @@ public final class AudioPlayer: ObservableObject, Sendable {
     public init(
         timeUpdateInterval: CMTime = CMTime(value: 1, timescale: 10),
         initialVolume: Float = 1.0,
+        preferredInitialRate: Float = 1.0,
         didStartPlaying: @escaping @Sendable () -> Void = {},
         didFinishPlaying: @escaping @Sendable () -> Void = {},
         didUpdateBuffer: @escaping @Sendable (CMSampleBuffer) -> Void = { _ in }
     ) {
         self.timeUpdateInterval = timeUpdateInterval
         self.initialVolume = initialVolume
+        self.preferredInitialRate = preferredInitialRate
         self.didStartPlaying = didStartPlaying
         self.didFinishPlaying = didFinishPlaying
         self.didUpdateBuffer = didUpdateBuffer
@@ -186,6 +189,10 @@ public final class AudioPlayer: ObservableObject, Sendable {
                     self?.setCurrentState(.buffering)
                 }
             }
+        }
+        // Apply preferred initial rate so playback can start at the desired speed (e.g., 2x)
+        if preferredInitialRate > 0 {
+            synchronizer?.desiredRate = preferredInitialRate
         }
         synchronizer?.prepare(type: type)
     }
