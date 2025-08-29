@@ -256,7 +256,7 @@ final class AudioSynchronizer: Sendable {
                     startPlaybackIfNeeded(didStart: &didStart)
                 }
             } else {
-                bufferLog("⏳ HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)")
+                throttledBufferLog("⏳ HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)", throttleKey: "holding_buffers", throttleInterval: 2.0)
             }
             startPlaybackIfNeeded(didStart: &didStart)
 
@@ -303,7 +303,7 @@ final class AudioSynchronizer: Sendable {
                     enqueuedAny = true
                 }
             } else {
-                bufferLog("⏳ RESTART HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)")
+                throttledBufferLog("⏳ RESTART HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)", throttleKey: "restart_holding_buffers", throttleInterval: 2.0)
             }
             if !didStart {
                 audioSynchronizer.setRate(rate, time: time)
@@ -450,7 +450,7 @@ final class AudioSynchronizer: Sendable {
                 enqueuedAny = true
             }
         } else {
-            bufferLog("⏳ HANDLE HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)")
+            throttledBufferLog("⏳ HANDLE HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)", throttleKey: "handle_holding_buffers", throttleInterval: 2.0)
         }
         
         // If we successfully enqueued data and synchronizer is stopped, start it
