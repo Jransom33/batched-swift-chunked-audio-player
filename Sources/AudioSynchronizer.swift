@@ -720,13 +720,11 @@ final class AudioSynchronizer: Sendable {
         // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
         // but timebase never starts advancing. Use setRate with explicit time parameter.
         
-        // Set initial timebase to zero to ensure proper initialization
-        synchronizer.setTime(.zero)
+        // Start with 1.0x rate at time zero to establish stable timebase
+        // The key is using setRate(rate, time:) instead of just setting .rate property
+        synchronizer.setRate(1.0, time: CMTime.zero)
         
-        // Start with 1.0x rate to establish stable timebase
-        synchronizer.setRate(1.0, time: .zero)
-        
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setTime(.zero) + setRate(1.0, time: .zero)")
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(1.0, time: CMTime.zero)")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
