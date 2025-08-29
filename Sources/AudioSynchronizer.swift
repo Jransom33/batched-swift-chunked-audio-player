@@ -350,9 +350,9 @@ final class AudioSynchronizer: Sendable {
         
         if shouldStart {
             bufferLog("🎯 STARTING PLAYBACK - Conditions met (sufficient: \(hasSufficientSystemData), buffer: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, dataComplete: \(dataComplete))")
-            // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
-            audioSynchronizer.setRate(1.0, time: .zero)
-            // Allow timebase to stabilize before setting desired rate
+            // Resume from current synchronizer time to avoid jumping to zero
+            let resumeTime = audioSynchronizer.currentTime()
+            audioSynchronizer.setRate(1.0, time: resumeTime)
             if desiredRate != 1.0 {
                 audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
             }
@@ -456,8 +456,9 @@ final class AudioSynchronizer: Sendable {
         // If we successfully enqueued data and synchronizer is stopped, start it
         if enqueuedAny && synchronizer.rate == 0 {
             bufferLog("🎬 STARTING PLAYBACK - Enqueued data and synchronizer was stopped")
-            // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
-            synchronizer.setRate(1.0, time: synchronizer.currentTime())
+            // Resume exactly from the current synchronizer time to avoid jumps
+            let resumeTime = synchronizer.currentTime()
+            synchronizer.setRate(1.0, time: resumeTime)
             if desiredRate != 1.0 {
                 synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
             }
@@ -589,7 +590,7 @@ final class AudioSynchronizer: Sendable {
                 let currentTime = time.seconds
                 let queueDuration = audioBuffersQueue.duration.seconds
                 let bufferAhead = queueDuration - currentTime
-                let minimumBufferThreshold: Double = 0.5 // Start buffering when less than 500ms ahead
+                let minimumBufferThreshold: Double = Self.bufferThreshold // Consistent 2.0s threshold
                 
                 // Check if we're running low on buffer OR completely caught up
                 let isRunningLowOnBuffer = bufferAhead <= minimumBufferThreshold
@@ -613,10 +614,9 @@ final class AudioSynchronizer: Sendable {
                             isBuffering = true
                             bufferLog("🌀 ENTERED BUFFERING - Player caught up to buffered content (time: \(String(format: "%.2f", currentTime))s, buffered: \(String(format: "%.2f", queueDuration))s)")
                             
-                            // Pause the synchronizer to stop time advancement during buffering
-                            // CRITICAL FIX: Reset timebase to zero to prevent it from racing ahead
-                            audioSynchronizer.setRate(0.0, time: .zero)
-                            bufferLog("⏸️ PAUSED SYNCHRONIZER - Reset timebase to zero during buffering")
+                            // Pause the synchronizer at the current position to prevent UI jump to 0
+                            audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
+                            bufferLog("⏸️ PAUSED SYNCHRONIZER - Preserved timebase at current position during buffering")
                             
                             onBuffering()
                             
@@ -639,10 +639,9 @@ final class AudioSynchronizer: Sendable {
                         isBuffering = true
                         bufferLog("⚠️ PREEMPTIVE BUFFERING - Running low on buffer (bufferAhead: \(String(format: "%.2f", bufferAhead))s, threshold: \(String(format: "%.1f", minimumBufferThreshold))s)")
                         
-                        // Pause the synchronizer to stop time advancement during buffering
-                        // CRITICAL FIX: Reset timebase to zero to prevent it from racing ahead
-                        audioSynchronizer.setRate(0.0, time: .zero)
-                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Reset timebase to zero preemptively")
+                        // Pause the synchronizer at the current position to prevent UI jump to 0
+                        audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
+                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Preserved timebase at current position (preemptive)")
                         
                         onBuffering()
                         
