@@ -718,11 +718,27 @@ final class AudioSynchronizer: Sendable {
         
         // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
         // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
-        // but timebase never starts advancing. Use setRate with explicit time parameter.
+        // but timebase never starts advancing.
         
-        // Start with 1.0x rate at time zero to establish stable timebase
-        // The key is using setRate(rate, time:) instead of just setting .rate property
+        // Step 1: Ensure the synchronizer starts its master clock
+        synchronizer.rate = 0.0  // Reset to ensure clean state
+        
+        // Step 2: Use setRate with explicit time to force timebase initialization
         synchronizer.setRate(1.0, time: CMTime.zero)
+        
+        // Step 3: Immediately verify timebase is running by checking currentTime after brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            let verificationTime = synchronizer.currentTime()
+            bufferLog("🔧 TIMEBASE VERIFICATION - currentTime after init: \(verificationTime.seconds)s")
+            
+            // If still stuck at zero, try alternative initialization
+            if verificationTime.seconds == 0.0 {
+                bufferLog("⚠️ TIMEBASE STUCK - Attempting alternative initialization")
+                // Force start the synchronizer's master clock
+                synchronizer.rate = 1.0
+                synchronizer.setRate(1.0, time: CMTime.zero)
+            }
+        }
         
         bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(1.0, time: CMTime.zero)")
         
