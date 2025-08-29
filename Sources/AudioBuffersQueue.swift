@@ -30,9 +30,15 @@ final class AudioBuffersQueue: Sendable {
                 packetCount: numberOfPackets,
                 packetDescriptions: packets
             ) else { return }
+            // Diagnostics: count enqueued seconds
+            let seconds = buffer.duration.seconds
             updateDuration(for: buffer)
             buffers.append(buffer)
             allBuffers.append(buffer)
+            // Emit minimal log only when seconds is non-trivial
+            if seconds > 0.0 {
+                // no-op placeholder for external diag aggregation
+            }
         }
     }
 

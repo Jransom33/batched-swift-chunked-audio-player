@@ -90,6 +90,43 @@ final class AudioSynchronizer: Sendable {
         }
     }
 
+    // MARK: - Diagnostics (lightweight)
+    private nonisolated(unsafe) var diagEnabled = true
+    private nonisolated(unsafe) var diagLastTick: Date = .distantPast
+    private nonisolated(unsafe) var diagBytesReceivedThisTick: Int = 0
+    private nonisolated(unsafe) var diagAudioSecondsEnqueuedThisTick: Double = 0
+    private nonisolated(unsafe) var diagBuffersEnqueuedThisTick: Int = 0
+    private nonisolated(unsafe) var diagEnqueueLoopsThisTick: Int = 0
+    private nonisolated(unsafe) var diagLastQueueDurationSeconds: Double = 0
+
+    private func emitDiagnosticsIfNeeded(context: String) {
+        guard diagEnabled else { return }
+        let now = Date()
+        if diagLastTick == .distantPast { diagLastTick = now }
+        let dt = now.timeIntervalSince(diagLastTick)
+        guard dt >= 1.0 else { return }
+        let bytesPerSec = Double(diagBytesReceivedThisTick) / dt
+        let audioSecPerSec = diagAudioSecondsEnqueuedThisTick / dt
+        throttledBufferLog(
+            String(
+                format: "📊 DIAG [%@] ingest: %.1f KB/s, audio %+0.2f s/s, enqLoops: %d, buffers: %d",
+                context,
+                bytesPerSec / 1024.0,
+                audioSecPerSec,
+                diagEnqueueLoopsThisTick,
+                diagBuffersEnqueuedThisTick
+            ),
+            throttleKey: "diag_\(context)",
+            throttleInterval: 1.0
+        )
+        // reset tick
+        diagLastTick = now
+        diagBytesReceivedThisTick = 0
+        diagAudioSecondsEnqueuedThisTick = 0
+        diagBuffersEnqueuedThisTick = 0
+        diagEnqueueLoopsThisTick = 0
+    }
+
     var volume: Float {
         get { audioRenderer?.volume ?? initialVolume }
         set { audioRenderer?.volume = newValue }
@@ -176,7 +213,8 @@ final class AudioSynchronizer: Sendable {
         let oldRate = audioSynchronizer.rate
         let newRate = rate ?? desiredRate
         guard audioSynchronizer.rate != newRate else { return }
-        audioSynchronizer.rate = newRate
+        // Use time-based rate change to ensure timebase consistency
+        audioSynchronizer.setRate(newRate, time: audioSynchronizer.currentTime())
         if oldRate == 0.0 && newRate > 0.0 {
             onPlaying()
         }
@@ -206,6 +244,7 @@ final class AudioSynchronizer: Sendable {
     }
 
     func receive(data: Data) {
+        if diagEnabled { diagBytesReceivedThisTick += data.count }
         audioFileStream?.parseData(data)
     }
 
@@ -253,11 +292,16 @@ final class AudioSynchronizer: Sendable {
                     audioBuffersQueue.removeFirst()
                     onDurationChanged(audioBuffersQueue.duration)
                     enqueuedAny = true
+                    if diagEnabled {
+                        diagBuffersEnqueuedThisTick += 1
+                        diagAudioSecondsEnqueuedThisTick += buffer.duration.seconds
+                    }
                     startPlaybackIfNeeded(didStart: &didStart)
                 }
             } else {
                 throttledBufferLog("⏳ HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)", throttleKey: "holding_buffers", throttleInterval: 2.0)
             }
+            emitDiagnosticsIfNeeded(context: "feed")
             startPlaybackIfNeeded(didStart: &didStart)
 
             if !enqueuedAny,
@@ -301,10 +345,15 @@ final class AudioSynchronizer: Sendable {
                     audioBuffersQueue.removeFirst()
                     onDurationChanged(audioBuffersQueue.duration)
                     enqueuedAny = true
+                    if diagEnabled {
+                        diagBuffersEnqueuedThisTick += 1
+                        diagAudioSecondsEnqueuedThisTick += buffer.duration.seconds
+                    }
                 }
             } else {
                 throttledBufferLog("⏳ RESTART HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)", throttleKey: "restart_holding_buffers", throttleInterval: 2.0)
             }
+            emitDiagnosticsIfNeeded(context: "restart_feed")
             if !didStart {
                 audioSynchronizer.setRate(rate, time: time)
                 didStart = true
