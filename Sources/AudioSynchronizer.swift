@@ -40,12 +40,17 @@ final class AudioSynchronizer: Sendable {
     
     // MARK: - Buffer Thresholds
     /// Dynamic buffer threshold that adapts to playback rate
-    /// At higher rates (2x), we need proportionally more buffer to avoid constant buffering
-    /// Base threshold of 1.5s + (rate * 0.75s) ensures smooth playback at any speed
+    /// Conservative thresholds to prevent constant buffering on small fluctuations
+    /// Uses larger safety margins at higher rates
     private func bufferThreshold(for rate: Float) -> Double {
-        let baseThreshold = 1.5
-        let rateMultiplier = 0.75
-        return baseThreshold + (Double(rate) * rateMultiplier)
+        // Much more conservative: give plenty of headroom
+        if rate <= 1.0 {
+            return 1.0  // 1x speed: 1.0s threshold
+        } else if rate <= 1.5 {
+            return 1.2  // 1.5x speed: 1.2s threshold  
+        } else {
+            return 1.5  // 2x+ speed: 1.5s threshold (not 3.0s!)
+        }
     }
     
     /// Legacy constant threshold for compatibility
@@ -649,7 +654,9 @@ final class AudioSynchronizer: Sendable {
                 let minimumBufferThreshold: Double = bufferThreshold(for: currentRate) // Dynamic threshold based on rate
                 
                 // Check if we're running low on buffer OR completely caught up
-                let isRunningLowOnBuffer = bufferAhead <= minimumBufferThreshold
+                // Add hysteresis: only trigger buffering if significantly below threshold
+                let bufferingHysteresis = 0.5  // 0.5s safety margin
+                let isRunningLowOnBuffer = bufferAhead <= (minimumBufferThreshold - bufferingHysteresis)
                 let isCaughtUpCompletely = time + epsilon >= audioBuffersQueue.duration
                 
                 if isCaughtUpCompletely {
