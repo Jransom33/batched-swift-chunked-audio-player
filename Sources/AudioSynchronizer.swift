@@ -515,9 +515,11 @@ final class AudioSynchronizer: Sendable {
                 // Apply desired rate directly - no need for 1.0x intermediate step
                 audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
                 bufferLog("✅ FORCE RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
-                bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
-            onPlaying()
             }
+            
+            // CRITICAL: Always notify UI that we're playing when exiting buffering
+            bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
+            onPlaying()
             
             // Restart media data requests immediately
             audioRenderer.requestMediaDataWhenReady(on: queue) { [weak self] in
