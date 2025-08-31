@@ -25,16 +25,33 @@ final class AudioBuffersQueue: Sendable {
         packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
     ) throws {
         try withLock {
+            // 📊 QUEUE CONSUMPTION - Show how the queue is consuming incoming data
+            let queueSizeBefore = buffers.count
+            let queueDurationBefore = duration.seconds
+            
             guard let buffer = try makeSampleBuffer(
                 from: Data(bytes: bytes, count: Int(numberOfBytes)),
                 packetCount: numberOfPackets,
                 packetDescriptions: packets
             ) else { return }
+            
             // Diagnostics: count enqueued seconds
             let seconds = buffer.duration.seconds
+            let bufferTimestamp = buffer.presentationTimeStamp.seconds
+            
             updateDuration(for: buffer)
             buffers.append(buffer)
             allBuffers.append(buffer)
+            
+            // 📊 QUEUE CONSUMPTION SUMMARY - Show the complete picture
+            let queueSizeAfter = buffers.count
+            let queueDurationAfter = duration.seconds
+            let durationAdded = queueDurationAfter - queueDurationBefore
+            
+            print("📊 QUEUE CONSUMPTION - Incoming: \(numberOfBytes) bytes, \(numberOfPackets) packets")
+            print("📊 QUEUE CONSUMPTION - Buffer: \(String(format: "%.3f", seconds))s at time \(String(format: "%.3f", bufferTimestamp))s")
+            print("📊 QUEUE CONSUMPTION - Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers, Duration: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s (+\(String(format: "%.2f", durationAdded))s)")
+            
             // Emit minimal log only when seconds is non-trivial
             if seconds > 0.0 {
                 // no-op placeholder for external diag aggregation
@@ -49,7 +66,18 @@ final class AudioBuffersQueue: Sendable {
     func dequeue() -> CMSampleBuffer? {
         withLock {
             if buffers.isEmpty { return nil }
-            return buffers.removeFirst()
+            
+            // 📊 QUEUE CONSUMPTION - Show when buffers are consumed by renderer
+            let buffer = buffers.removeFirst()
+            let bufferDuration = buffer.duration.seconds
+            let bufferTimestamp = buffer.presentationTimeStamp.seconds
+            let queueSizeAfter = buffers.count
+            let queueDurationAfter = duration.seconds
+            
+            print("📊 QUEUE CONSUMPTION - RENDERER CONSUMED: \(String(format: "%.3f", bufferDuration))s at time \(String(format: "%.3f", bufferTimestamp))s")
+            print("📊 QUEUE CONSUMPTION - Queue after consumption: \(queueSizeAfter) buffers, Duration: \(String(format: "%.2f", queueDurationAfter))s")
+            
+            return buffer
         }
     }
 
