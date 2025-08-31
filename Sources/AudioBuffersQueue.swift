@@ -49,7 +49,10 @@ final class AudioBuffersQueue: Sendable {
     func dequeue() -> CMSampleBuffer? {
         withLock {
             if buffers.isEmpty { return nil }
-            return buffers.removeFirst()
+            let buffer = buffers.removeFirst()
+            // Recalculate duration after removing buffer
+            recalculateDuration()
+            return buffer
         }
     }
 
@@ -70,7 +73,10 @@ final class AudioBuffersQueue: Sendable {
     }
 
     func flush() {
-        withLock { buffers.removeAll() }
+        withLock { 
+            buffers.removeAll()
+            recalculateDuration()
+        }
     }
 
     func seek(to time: CMTime) {
@@ -137,6 +143,16 @@ final class AudioBuffersQueue: Sendable {
 
     private func updateDuration(for buffer: CMSampleBuffer) {
         duration = buffer.presentationTimeStamp + buffer.duration
+    }
+    
+    private func recalculateDuration() {
+        if buffers.isEmpty {
+            duration = .zero
+        } else {
+            // Duration is the end time of the last buffer in the queue
+            let lastBuffer = buffers.last!
+            duration = lastBuffer.presentationTimeStamp + lastBuffer.duration
+        }
     }
 
     private func withLock<T>(_ perform: () throws -> T) rethrows -> T {
