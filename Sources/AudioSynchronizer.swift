@@ -453,6 +453,7 @@ final class AudioSynchronizer: Sendable {
         let minimumBufferThreshold: Double = bufferThreshold(for: currentRate)
         
         bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s, bufferAhead: \(String(format: "%.2f", bufferAhead))s")
+        bufferLog("📊 PKG_FORCE_EXIT - Queue: \(String(format: "%.2f", queueDuration))s total | Ahead: \(String(format: "%.2f", bufferAhead))s | Player: \(String(format: "%.2f", currentTime))s | Threshold: \(String(format: "%.1f", minimumBufferThreshold))s | isEmpty: \(audioBuffersQueue.isEmpty)")
         
         // Check if we have enough buffered content ahead of current playback position
         let hasMinimumBuffer = bufferAhead >= minimumBufferThreshold
@@ -653,9 +654,13 @@ final class AudioSynchronizer: Sendable {
                 let currentRate = audioSynchronizer.rate
                 let minimumBufferThreshold: Double = bufferThreshold(for: currentRate) // Dynamic threshold based on rate
                 
+                // 📊 PACKAGE BUFFER STATUS - Show what the package actually sees
+                bufferLog("📊 PKG_BUFFER - Queue: \(String(format: "%.2f", queueDuration))s total | Ahead: \(String(format: "%.2f", bufferAhead))s | Player: \(String(format: "%.2f", currentTime))s | Threshold: \(String(format: "%.1f", minimumBufferThreshold))s | Rate: \(currentRate)x | Empty: \(audioBuffersQueue.isEmpty)")
+                
                 // Check if we're running low on buffer OR completely caught up
                 // Add hysteresis: only trigger buffering if significantly below threshold
-                let bufferingHysteresis = 0.5  // 0.5s safety margin
+                // At 2x speed, need larger gap to prevent rapid cycling
+                let bufferingHysteresis = max(1.0, Double(currentRate) * 0.75)  // Scale with playback rate
                 let isRunningLowOnBuffer = bufferAhead <= (minimumBufferThreshold - bufferingHysteresis)
                 let isCaughtUpCompletely = time + epsilon >= audioBuffersQueue.duration
                 
@@ -834,7 +839,11 @@ final class AudioSynchronizer: Sendable {
                 packets: packets
             )
             
-            bufferLog("✅ ENQUEUED PACKETS - Queue duration: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, isEmpty: \(audioBuffersQueue.isEmpty)")
+            let newDuration = audioBuffersQueue.duration.seconds
+            let currentPlayerTime = audioSynchronizer?.currentTime().seconds ?? 0.0
+            let newBufferAhead = newDuration - currentPlayerTime
+            bufferLog("✅ ENQUEUED PACKETS - Queue duration: \(String(format: "%.2f", newDuration))s, isEmpty: \(audioBuffersQueue.isEmpty)")
+            bufferLog("📊 PKG_ENQUEUE - Queue: \(String(format: "%.2f", newDuration))s total | Ahead: \(String(format: "%.2f", newBufferAhead))s | Player: \(String(format: "%.2f", currentPlayerTime))s")
             onDurationChanged(audioBuffersQueue.duration)
             
             // Force exit buffering if we have new data
