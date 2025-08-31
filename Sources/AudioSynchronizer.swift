@@ -39,11 +39,16 @@ private func throttledBufferLog(_ message: String, throttleKey: String, throttle
 final class AudioSynchronizer: Sendable {
     
     // MARK: - Buffer Thresholds
-    /// Consistent buffer threshold for both initial playback and buffering recovery
-    /// This prevents infinite buffering loops where recovery threshold > initial threshold
-    /// 
-    /// Note: 1.5s was insufficient to prevent choppy word-by-word playback, increased to 2.0s
-    /// to ensure smooth continuous playback without buffering between words
+    /// Dynamic buffer threshold that adapts to playback rate
+    /// At higher rates (2x), we need proportionally more buffer to avoid constant buffering
+    /// Base threshold of 1.5s + (rate * 0.75s) ensures smooth playback at any speed
+    private func bufferThreshold(for rate: Float) -> Double {
+        let baseThreshold = 1.5
+        let rateMultiplier = 0.75
+        return baseThreshold + (Double(rate) * rateMultiplier)
+    }
+    
+    /// Legacy constant threshold for compatibility
     private static let bufferThreshold: Double = 2.0
     typealias RateCallback = @Sendable (_ time: Float) -> Void
     typealias TimeCallback = @Sendable (_ time: CMTime) -> Void
@@ -284,7 +289,9 @@ final class AudioSynchronizer: Sendable {
             guard let self, let audioRenderer, let audioBuffersQueue else { return }
             var enqueuedAny = false
             // Only feed buffers to renderer if synchronizer is actually playing or we have sufficient buffer
-            let shouldFeedRenderer = audioSynchronizer?.rate != 0 || audioBuffersQueue.duration.seconds >= Self.bufferThreshold
+            let currentRate = audioSynchronizer?.rate ?? 1.0
+            let threshold = bufferThreshold(for: currentRate)
+            let shouldFeedRenderer = audioSynchronizer?.rate != 0 || audioBuffersQueue.duration.seconds >= threshold
             
             if shouldFeedRenderer {
                 while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
@@ -299,7 +306,7 @@ final class AudioSynchronizer: Sendable {
                     startPlaybackIfNeeded(didStart: &didStart)
                 }
             } else {
-                throttledBufferLog("⏳ HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", Self.bufferThreshold))s)", throttleKey: "holding_buffers", throttleInterval: 2.0)
+                throttledBufferLog("⏳ HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", threshold))s)", throttleKey: "holding_buffers", throttleInterval: 2.0)
             }
             emitDiagnosticsIfNeeded(context: "feed")
             startPlaybackIfNeeded(didStart: &didStart)
@@ -391,7 +398,8 @@ final class AudioSynchronizer: Sendable {
         
         let dataComplete = receiveComplete && audioFileStream.parsingComplete
         let hasSufficientSystemData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
-        let initialBufferThreshold: Double = Self.bufferThreshold // Require consistent buffer before starting
+        let currentRate = audioSynchronizer.rate
+        let initialBufferThreshold: Double = bufferThreshold(for: currentRate) // Require consistent buffer before starting
         let hasEnoughBuffer = audioBuffersQueue.duration.seconds >= initialBufferThreshold
         
         // Only start if we have enough buffer OR the stream is complete with any data
@@ -433,7 +441,8 @@ final class AudioSynchronizer: Sendable {
         
         // MINIMUM BUFFER THRESHOLD: Use same threshold as initial playback for consistency
         // This prevents infinite buffering loops where recovery threshold > initial threshold
-        let minimumBufferThreshold: Double = Self.bufferThreshold
+        let currentRate = audioSynchronizer.rate
+        let minimumBufferThreshold: Double = bufferThreshold(for: currentRate)
         
         bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s, bufferAhead: \(String(format: "%.2f", bufferAhead))s")
         
@@ -639,7 +648,8 @@ final class AudioSynchronizer: Sendable {
                 let currentTime = time.seconds
                 let queueDuration = audioBuffersQueue.duration.seconds
                 let bufferAhead = queueDuration - currentTime
-                let minimumBufferThreshold: Double = Self.bufferThreshold // Consistent 2.0s threshold
+                let currentRate = audioSynchronizer.rate
+                let minimumBufferThreshold: Double = bufferThreshold(for: currentRate) // Dynamic threshold based on rate
                 
                 // Check if we're running low on buffer OR completely caught up
                 let isRunningLowOnBuffer = bufferAhead <= minimumBufferThreshold
