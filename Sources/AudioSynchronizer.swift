@@ -236,6 +236,7 @@ final class AudioSynchronizer: Sendable {
         // Use time-based rate change to ensure timebase consistency
         audioSynchronizer.setRate(newRate, time: audioSynchronizer.currentTime())
         if oldRate == 0.0 && newRate > 0.0 {
+            bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
             onPlaying()
         }
     }
@@ -337,7 +338,9 @@ final class AudioSynchronizer: Sendable {
                 if !isBuffering { 
                     isBuffering = true
                     bufferLog("🔴 MEDIA REQUEST DETECTED BUFFERING - No buffers available to enqueue")
-                    onBuffering() 
+                    bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                                            bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                        onBuffering() 
                 }
             } else {
                 if isBuffering { 
@@ -411,7 +414,9 @@ final class AudioSynchronizer: Sendable {
                 if !isBuffering { 
                     isBuffering = true
                     bufferLog("🔴 RESTART REQUEST DETECTED BUFFERING - No buffers available to enqueue")
-                    onBuffering() 
+                    bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                                            bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                        onBuffering() 
                 }
             } else {
                 if isBuffering { 
@@ -451,6 +456,7 @@ final class AudioSynchronizer: Sendable {
             bufferLog("✅ STARTED PLAYBACK - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
             didStart = true
             isBuffering = false
+            bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
             onPlaying()
         } else {
             throttledBufferLog("⏸️ PLAYBACK NOT READY - Waiting for \(String(format: "%.1f", initialBufferThreshold))s buffer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, sufficient: \(hasSufficientSystemData), dataComplete: \(dataComplete))", throttleKey: "not_ready", throttleInterval: 2.0)
@@ -509,7 +515,8 @@ final class AudioSynchronizer: Sendable {
                 // Apply desired rate directly - no need for 1.0x intermediate step
                 audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
                 bufferLog("✅ FORCE RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
-                onPlaying()
+                bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
+            onPlaying()
             }
             
             // Restart media data requests immediately
@@ -572,6 +579,7 @@ final class AudioSynchronizer: Sendable {
             synchronizer.setRate(desiredRate, time: resumeTime)
             bufferLog("✅ STARTED PLAYBACK - Applied desired rate \(desiredRate), actual rate: \(synchronizer.rate)")
             isBuffering = false
+            bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
             onPlaying()
         } else if enqueuedAny {
             bufferLog("📤 ENQUEUED DATA - Synchronizer running at rate: \(synchronizer.rate)")
@@ -740,7 +748,9 @@ final class AudioSynchronizer: Sendable {
                             audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
                             bufferLog("⏸️ PAUSED SYNCHRONIZER - Preserved timebase at current position during buffering")
                             
-                            onBuffering()
+                            bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                                            bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                        onBuffering()
                             
                             // Immediately try to recover - sometimes we have buffer but it's not being detected
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -765,6 +775,8 @@ final class AudioSynchronizer: Sendable {
                         audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
                         bufferLog("⏸️ PAUSED SYNCHRONIZER - Preserved timebase at current position (preemptive)")
                         
+                        bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
+                                            bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                         onBuffering()
                         
                         // Try to recover after a brief delay
