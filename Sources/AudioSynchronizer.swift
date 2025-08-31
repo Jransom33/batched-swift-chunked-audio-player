@@ -93,6 +93,7 @@ final class AudioSynchronizer: Sendable {
     nonisolated(unsafe) var desiredRate: Float = 1.0 {
         didSet {
             bufferLog("📊 DIAG RATE CHANGE: desiredRate \(oldValue) → \(desiredRate)")
+            print("🟣 [RATE_CHANGE] Desired rate changed: \(oldValue) → \(desiredRate)")
             if desiredRate == 0.0 {
                 pause()
             } else {
@@ -105,13 +106,18 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var diagEnabled = true
     private nonisolated(unsafe) var diagLastTick: Date = .distantPast
     private nonisolated(unsafe) var diagBytesReceivedThisTick: Int = 0
+    
+    // MARK: - Synchronizer Rate Tracking
+    private func setSynchronizerRate(_ rate: Float, time: CMTime, context: String = "") {
+        let timeSecs = time.seconds
+        let currentTimeSecs = audioSynchronizer?.currentTime().seconds ?? 0.0
+        print("🟣 [SYNC_RATE] Setting rate: \(rate)x at time: \(String(format: "%.3f", timeSecs))s | Current: \(String(format: "%.3f", currentTimeSecs))s | Context: \(context)")
+        audioSynchronizer?.setRate(rate, time: time)
+    }
     private nonisolated(unsafe) var diagAudioSecondsEnqueuedThisTick: Double = 0
     private nonisolated(unsafe) var diagBuffersEnqueuedThisTick: Int = 0
     private nonisolated(unsafe) var diagEnqueueLoopsThisTick: Int = 0
     private nonisolated(unsafe) var diagLastQueueDurationSeconds: Double = 0
-    
-    // MARK: - Time Tracking
-    private nonisolated(unsafe) var lastObservedTime: CMTime?
 
     private func emitDiagnosticsIfNeeded(context: String) {
         guard diagEnabled else { return }
@@ -362,21 +368,23 @@ final class AudioSynchronizer: Sendable {
         let shouldFeedRenderer = audioSynchronizer.rate != 0 || audioBuffersQueue.duration.seconds >= threshold
             
             if shouldFeedRenderer {
-                bufferLog("🔄 RESTART RENDERER FEED - Starting to feed buffers to renderer (queue: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", threshold))s)")
-                var buffersFed = 0
-                var totalAudioFed = 0.0
+                var buffersFeToRenderer = 0
+                var totalDurationFed: Double = 0
                 
                 while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
                     let bufferDuration = buffer.duration.seconds
-                    let bufferTimestamp = buffer.presentationTimeStamp.seconds
-                    bufferLog("🔄 RESTART ENQUEUE - Buffer: \(String(format: "%.2f", bufferDuration))s at time \(String(format: "%.2f", bufferTimestamp))s")
+                    let bufferStart = buffer.presentationTimeStamp.seconds
+                    let bufferEnd = bufferStart + bufferDuration
+                    let rendererReadyState = audioRenderer.isReadyForMoreMediaData
+                    
+                    print("🟧 [RESTART_FEED] Feeding buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Renderer ready: \(rendererReadyState)")
                     
                     audioRenderer.enqueue(buffer)
                     audioBuffersQueue.removeFirst()
-                    
-                    buffersFed += 1
-                    totalAudioFed += bufferDuration
+                    onDurationChanged(audioBuffersQueue.duration)
                     enqueuedAny = true
+                    buffersFeToRenderer += 1
+                    totalDurationFed += bufferDuration
                     
                     if diagEnabled {
                         diagBuffersEnqueuedThisTick += 1
@@ -384,8 +392,8 @@ final class AudioSynchronizer: Sendable {
                     }
                 }
                 
-                if buffersFed > 0 {
-                    bufferLog("🔄 RESTART SUMMARY - Fed \(buffersFed) buffers (\(String(format: "%.2f", totalAudioFed))s) to renderer, queue remaining: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s")
+                if buffersFeToRenderer > 0 {
+                    print("🟧 [RESTART_FEED_SUMMARY] Fed \(buffersFeToRenderer) buffers, total duration: \(String(format: "%.3f", totalDurationFed))s to renderer")
                 }
             } else {
                 throttledBufferLog("⏳ RESTART HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", threshold))s)", throttleKey: "restart_holding_buffers", throttleInterval: 2.0)
@@ -529,37 +537,29 @@ final class AudioSynchronizer: Sendable {
         let threshold = bufferThreshold(for: currentRate)
         let shouldFeedRenderer = audioSynchronizer?.rate != 0 || audioBuffersQueue.duration.seconds >= threshold
         
-        // 📊 THRESHOLD ANALYSIS - Show why we're feeding or not feeding
-        let queueDuration = audioBuffersQueue.duration.seconds
-        let rateStatus = audioSynchronizer?.rate != 0 ? "playing" : "stopped"
-        let thresholdStatus = queueDuration >= threshold ? "above" : "below"
-        bufferLog("📊 THRESHOLD ANALYSIS - Rate: \(currentRate)x (\(rateStatus)), Queue: \(String(format: "%.2f", queueDuration))s, Threshold: \(String(format: "%.1f", threshold))s (\(thresholdStatus)), Should feed: \(shouldFeedRenderer)")
-        
         if shouldFeedRenderer {
-            bufferLog("🎬 RENDERER FEED - Starting to feed buffers to renderer (queue: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", threshold))s)")
-            var buffersFed = 0
-            var totalAudioFed = 0.0
+            var buffersFeToRenderer = 0
+            var totalDurationFed: Double = 0
             
             while let buffer = audioBuffersQueue.peek(), renderer.isReadyForMoreMediaData {
                 let bufferDuration = buffer.duration.seconds
-                let bufferTimestamp = buffer.presentationTimeStamp.seconds
-                bufferLog("🎬 RENDERER ENQUEUE - Buffer: \(String(format: "%.2f", bufferDuration))s at time \(String(format: "%.2f", bufferTimestamp))s")
+                let bufferStart = buffer.presentationTimeStamp.seconds
+                let bufferEnd = bufferStart + bufferDuration
+                let rendererReadyState = renderer.isReadyForMoreMediaData
+                
+                print("🟨 [RENDERER_FEED] Feeding buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Renderer ready: \(rendererReadyState)")
                 
                 renderer.enqueue(buffer)
                 audioBuffersQueue.removeFirst()
-                
-                buffersFed += 1
-                totalAudioFed += bufferDuration
+                onDurationChanged(audioBuffersQueue.duration)
                 enqueuedAny = true
-                
-                bufferLog("🎬 RENDERER CONSUMED - Buffer \(buffersFed): \(String(format: "%.2f", bufferDuration))s, total fed: \(String(format: "%.2f", totalAudioFed))s")
+                buffersFeToRenderer += 1
+                totalDurationFed += bufferDuration
             }
             
-            if buffersFed > 0 {
-                bufferLog("🎬 RENDERER SUMMARY - Fed \(buffersFed) buffers (\(String(format: "%.2f", totalAudioFed))s) to renderer, queue remaining: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s")
+            if buffersFeToRenderer > 0 {
+                print("🟨 [RENDERER_FEED_SUMMARY] Fed \(buffersFeToRenderer) buffers, total duration: \(String(format: "%.3f", totalDurationFed))s to renderer")
             }
-            
-            onDurationChanged(audioBuffersQueue.duration)
         } else {
             throttledBufferLog("⏳ HANDLE HOLDING BUFFERS - Waiting for sufficient buffer before feeding renderer (current: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, threshold: \(String(format: "%.1f", threshold))s)", throttleKey: "handle_holding_buffers", throttleInterval: 2.0)
         }
@@ -700,14 +700,16 @@ final class AudioSynchronizer: Sendable {
                 let currentRate = audioSynchronizer.rate
                 let minimumBufferThreshold: Double = bufferThreshold(for: currentRate) // Dynamic threshold based on rate
                 
+                // 📊 SYNCHRONIZER STATE - Show synchronizer's view of the world
+                let syncCurrentTime = audioSynchronizer.currentTime().seconds
+                let syncRate = audioSynchronizer.rate
+                let rendererHasData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
+                let queueBufferCount = audioBuffersQueue.isEmpty ? 0 : 1 // Simplified since we can't access buffers.count directly
+                
+                print("🟪 [SYNC_STATE] Time: \(String(format: "%.3f", syncCurrentTime))s | Rate: \(syncRate)x | Queue: \(queueBufferCount) buffers, \(String(format: "%.2f", queueDuration))s | Ahead: \(String(format: "%.2f", bufferAhead))s | Renderer ready: \(rendererHasData)")
+                
                 // 📊 PACKAGE BUFFER STATUS - Show what the package actually sees
                 bufferLog("📊 PKG_BUFFER - Queue: \(String(format: "%.2f", queueDuration))s total | Ahead: \(String(format: "%.2f", bufferAhead))s | Player: \(String(format: "%.2f", currentTime))s | Threshold: \(String(format: "%.1f", minimumBufferThreshold))s | Rate: \(currentRate)x | Empty: \(audioBuffersQueue.isEmpty)")
-                
-                // 🕐 SYNCHRONIZER CONSUMPTION - Show how the synchronizer is consuming time
-                let timeSinceLastCheck = currentTime - (lastObservedTime?.seconds ?? 0.0)
-                let expectedTimeAdvancement = (lastObservedTime != nil) ? ((currentTime - (lastObservedTime?.seconds ?? 0.0)) * Double(currentRate)) : 0.0
-                bufferLog("🕐 SYNCHRONIZER CONSUMPTION - Time advanced: \(String(format: "%.3f", timeSinceLastCheck))s, Expected at \(currentRate)x: \(String(format: "%.3f", expectedTimeAdvancement))s, Rate match: \(abs(timeSinceLastCheck - expectedTimeAdvancement) < 0.01 ? "✅" : "❌")")
-                lastObservedTime = time
                 
                 // Check if we're running low on buffer OR completely caught up
                 // Add hysteresis: only trigger buffering if significantly below threshold
@@ -896,12 +898,6 @@ final class AudioSynchronizer: Sendable {
             let newBufferAhead = newDuration - currentPlayerTime
             bufferLog("✅ ENQUEUED PACKETS - Queue duration: \(String(format: "%.2f", newDuration))s, isEmpty: \(audioBuffersQueue.isEmpty)")
             bufferLog("📊 PKG_ENQUEUE - Queue: \(String(format: "%.2f", newDuration))s total | Ahead: \(String(format: "%.2f", newBufferAhead))s | Player: \(String(format: "%.2f", currentPlayerTime))s")
-            
-            // 📊 AUDIO STREAM CONSUMPTION - Show how the audio stream is consuming data
-            let packetDuration = audioBuffersQueue.peek()?.duration.seconds ?? 0.0
-            let packetTimestamp = audioBuffersQueue.peek()?.presentationTimeStamp.seconds ?? 0.0
-            bufferLog("📊 AUDIO STREAM - Packet: \(String(format: "%.3f", packetDuration))s at time \(String(format: "%.3f", packetTimestamp))s, Total queue: \(String(format: "%.2f", newDuration))s")
-            
             onDurationChanged(audioBuffersQueue.duration)
             
             // Force exit buffering if we have new data
