@@ -191,6 +191,7 @@ public final class AudioPlayer: ObservableObject, Sendable {
             }
         }
         // Apply preferred initial rate so playback can start at the desired speed (e.g., 2x)
+        print("🎯 [INITIAL_RATE] Setting preferred initial rate: \(preferredInitialRate)x")
         synchronizer?.desiredRate = preferredInitialRate
         synchronizer?.prepare(type: type)
     }

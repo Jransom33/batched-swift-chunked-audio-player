@@ -845,23 +845,25 @@ final class AudioSynchronizer: Sendable {
         synchronizer.rate = 0.0  // Reset to ensure clean state
         
         // Step 2: Use setRate with explicit time to force timebase initialization
-        synchronizer.setRate(1.0, time: CMTime.zero)
+        // Use the desired rate (which may be 2.0x if set by preferredInitialRate)
+        synchronizer.setRate(desiredRate, time: CMTime.zero)
         
         // Step 3: Immediately verify timebase is running by checking currentTime after brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+            guard let self = self else { return }
             let verificationTime = synchronizer.currentTime()
             bufferLog("🔧 TIMEBASE VERIFICATION - currentTime after init: \(verificationTime.seconds)s")
             
             // If still stuck at zero, try alternative initialization
             if verificationTime.seconds == 0.0 {
                 bufferLog("⚠️ TIMEBASE STUCK - Attempting alternative initialization")
-                // Force start the synchronizer's master clock
-                synchronizer.rate = 1.0
-                synchronizer.setRate(1.0, time: CMTime.zero)
+                // Force start the synchronizer's master clock with desired rate
+                synchronizer.rate = self.desiredRate
+                synchronizer.setRate(self.desiredRate, time: CMTime.zero)
             }
         }
         
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(1.0, time: CMTime.zero)")
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(\(desiredRate), time: CMTime.zero)")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
