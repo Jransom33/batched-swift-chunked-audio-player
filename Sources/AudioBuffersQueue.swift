@@ -149,7 +149,8 @@ final class AudioBuffersQueue: Sendable {
         if buffers.isEmpty {
             duration = .zero
         } else {
-            // Duration is the end time of the last buffer in the queue
+            // Duration should be the end time of the last buffer in the queue
+            // This represents the total playable duration from start to end
             let lastBuffer = buffers.last!
             duration = lastBuffer.presentationTimeStamp + lastBuffer.duration
         }
