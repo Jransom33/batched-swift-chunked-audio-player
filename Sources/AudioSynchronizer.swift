@@ -87,6 +87,7 @@ final class AudioSynchronizer: Sendable {
 
     nonisolated(unsafe) var desiredRate: Float = 1.0 {
         didSet {
+            bufferLog("📊 DIAG RATE CHANGE: desiredRate \(oldValue) → \(desiredRate)")
             if desiredRate == 0.0 {
                 pause()
             } else {
@@ -249,7 +250,11 @@ final class AudioSynchronizer: Sendable {
     }
 
     func receive(data: Data) {
-        if diagEnabled { diagBytesReceivedThisTick += data.count }
+        if diagEnabled { 
+            diagBytesReceivedThisTick += data.count 
+            // Immediate diagnostic for data ingestion
+            bufferLog("📊 DIAG INGEST: +\(data.count) bytes (total this tick: \(diagBytesReceivedThisTick))")
+        }
         audioFileStream?.parseData(data)
     }
 
@@ -409,10 +414,8 @@ final class AudioSynchronizer: Sendable {
             bufferLog("🎯 STARTING PLAYBACK - Conditions met (sufficient: \(hasSufficientSystemData), buffer: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, dataComplete: \(dataComplete))")
             // Resume from current synchronizer time to avoid jumping to zero
             let resumeTime = audioSynchronizer.currentTime()
-            audioSynchronizer.setRate(1.0, time: resumeTime)
-            if desiredRate != 1.0 {
-                audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
-            }
+            audioSynchronizer.setRate(desiredRate, time: resumeTime)
+            bufferLog("✅ STARTED PLAYBACK - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
             didStart = true
             isBuffering = false
             onPlaying()
@@ -469,11 +472,9 @@ final class AudioSynchronizer: Sendable {
             // Force the synchronizer to resume if it's stopped
             if audioSynchronizer.rate == 0 {
                 bufferLog("🎬 FORCE RESUME - Restarting synchronizer at rate \(desiredRate)")
-                // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
-                audioSynchronizer.setRate(1.0, time: audioSynchronizer.currentTime())
-                if desiredRate != 1.0 {
-                    audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
-                }
+                // Apply desired rate directly - no need for 1.0x intermediate step
+                audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                bufferLog("✅ FORCE RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
                 onPlaying()
             }
             
@@ -516,10 +517,8 @@ final class AudioSynchronizer: Sendable {
             bufferLog("🎬 STARTING PLAYBACK - Enqueued data and synchronizer was stopped")
             // Resume exactly from the current synchronizer time to avoid jumps
             let resumeTime = synchronizer.currentTime()
-            synchronizer.setRate(1.0, time: resumeTime)
-            if desiredRate != 1.0 {
-                synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
-            }
+            synchronizer.setRate(desiredRate, time: resumeTime)
+            bufferLog("✅ STARTED PLAYBACK - Applied desired rate \(desiredRate), actual rate: \(synchronizer.rate)")
             isBuffering = false
             onPlaying()
         } else if enqueuedAny {
@@ -567,11 +566,9 @@ final class AudioSynchronizer: Sendable {
                 
                 // Rebuild the synchronizer connection
                 synchronizer.addRenderer(renderer)
-                // CRITICAL FIX: Start at 1.0x rate first to establish stable timebase, then set desired rate
-                synchronizer.setRate(1.0, time: .zero)
-                if desiredRate != 1.0 {
-                    synchronizer.setRate(desiredRate, time: synchronizer.currentTime())
-                }
+                // Apply desired rate directly
+                synchronizer.setRate(desiredRate, time: .zero)
+                bufferLog("✅ PIPELINE RESTART - Applied desired rate \(desiredRate), actual rate: \(synchronizer.rate)")
                 
                 bufferLog("✅ PIPELINE RESTART COMPLETE - Synchronizer reconnected")
                 self.isBuffering = false
@@ -720,12 +717,9 @@ final class AudioSynchronizer: Sendable {
                     
                     // Resume the synchronizer at the desired rate
                     if let audioSynchronizer = audioSynchronizer {
-                        // CRITICAL FIX: Start at 1.0x rate from zero to establish stable timebase, then set desired rate
-                        audioSynchronizer.setRate(1.0, time: .zero)
-                        if desiredRate != 1.0 {
-                            audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
-                        }
-                        bufferLog("▶️ RESUMED SYNCHRONIZER - Restarting playback from zero at rate \(desiredRate)")
+                        // Apply desired rate directly
+                        audioSynchronizer.setRate(desiredRate, time: .zero)
+                        bufferLog("▶️ RESUMED SYNCHRONIZER - Restarting playback from zero at rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
                     }
                     
                     // Force a media data request to ensure playback resumes
