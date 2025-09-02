@@ -788,7 +788,10 @@ final class AudioSynchronizer: Sendable {
                     }
                 } else {
                     // Normal playback path: update time continuously
-                    onTimeChanged(time)
+                    // Only update time if we're not buffering to prevent false progress
+                    if !isBuffering {
+                        onTimeChanged(time)
+                    }
                 }
             } else {
                 if isBuffering { 
