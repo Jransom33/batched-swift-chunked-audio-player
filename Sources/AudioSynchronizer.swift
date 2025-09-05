@@ -113,7 +113,19 @@ final class AudioSynchronizer: Sendable {
         let timeSecs = time.seconds
         let currentTimeSecs = audioSynchronizer?.currentTime().seconds ?? 0.0
         print("🟣 [SYNC_RATE] Setting rate: \(rate)x at time: \(String(format: "%.3f", timeSecs))s | Current: \(String(format: "%.3f", currentTimeSecs))s | Context: \(context)")
+        
+        // DIAGNOSTIC: Track unexpected timebase jumps
+        if currentTimeSecs > 0.5 && rate > 0.0 && context != "resume" {
+            print("🚨 [TIMEBASE_JUMP] Unexpected timebase advancement! Current: \(String(format: "%.3f", currentTimeSecs))s before setting rate \(rate)x | Context: \(context)")
+        }
+        
         audioSynchronizer?.setRate(rate, time: time)
+        
+        // DIAGNOSTIC: Check if timebase jumped after setRate
+        let newCurrentTime = audioSynchronizer?.currentTime().seconds ?? 0.0
+        if abs(newCurrentTime - timeSecs) > 0.1 {
+            print("🚨 [SETRATE_JUMP] Timebase jumped! Expected: \(String(format: "%.3f", timeSecs))s, Actual: \(String(format: "%.3f", newCurrentTime))s | Rate: \(rate)x | Context: \(context)")
+        }
     }
     private nonisolated(unsafe) var diagAudioSecondsEnqueuedThisTick: Double = 0
     private nonisolated(unsafe) var diagBuffersEnqueuedThisTick: Int = 0
@@ -235,7 +247,7 @@ final class AudioSynchronizer: Sendable {
         let newRate = rate ?? desiredRate
         guard audioSynchronizer.rate != newRate else { return }
         // Use time-based rate change to ensure timebase consistency
-        audioSynchronizer.setRate(newRate, time: audioSynchronizer.currentTime())
+        setSynchronizerRate(newRate, time: audioSynchronizer.currentTime(), context: "resume")
         if oldRate == 0.0 && newRate > 0.0 {
             bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
             onPlaying()
@@ -419,7 +431,7 @@ final class AudioSynchronizer: Sendable {
             }
             emitDiagnosticsIfNeeded(context: "restart_feed")
             if !didStart {
-                audioSynchronizer.setRate(rate, time: time)
+                setSynchronizerRate(rate, time: time, context: "restart_initial")
                 didStart = true
             }
 
@@ -473,7 +485,7 @@ final class AudioSynchronizer: Sendable {
             bufferLog("🎯 STARTING PLAYBACK - Conditions met (sufficient: \(hasSufficientSystemData), buffer: \(String(format: "%.2f", audioBuffersQueue.duration.seconds))s, dataComplete: \(dataComplete))")
             // Resume from current synchronizer time to avoid jumping to zero
             let resumeTime = audioSynchronizer.currentTime()
-            audioSynchronizer.setRate(desiredRate, time: resumeTime)
+            setSynchronizerRate(desiredRate, time: resumeTime, context: "startPlayback")
             bufferLog("✅ STARTED PLAYBACK - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
             didStart = true
             isBuffering = false
