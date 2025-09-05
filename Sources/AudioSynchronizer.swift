@@ -375,10 +375,10 @@ final class AudioSynchronizer: Sendable {
                     isBuffering = false 
                     bufferLog("💚 MEDIA REQUEST EXITED BUFFERING - Buffers available, enqueuedAny: \(enqueuedAny)")
                     // FIX: Always resume rate if paused
-                    if audioSynchronizer.rate == 0 {
+                    if let synchronizer = audioSynchronizer, synchronizer.rate == 0 {
                         bufferLog("🎬 EXIT RESUME - Restarting synchronizer at rate \(desiredRate)")
-                        audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
-                        bufferLog("✅ EXIT RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
+                        setSynchronizerRate(desiredRate, time: synchronizer.currentTime(), context: "exitBuffering")
+                        bufferLog("✅ EXIT RESUME - Applied desired rate \(desiredRate), actual rate: \(synchronizer.rate)")
                         onPlaying()
                     }
                     // Also try force exit method as backup
@@ -460,7 +460,7 @@ final class AudioSynchronizer: Sendable {
                     // FIX: Always resume rate if paused
                     if audioSynchronizer.rate == 0 {
                         bufferLog("🎬 EXIT RESUME - Restarting synchronizer at rate \(desiredRate)")
-                        audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                        setSynchronizerRate(desiredRate, time: audioSynchronizer.currentTime(), context: "exitBuffering")
                         bufferLog("✅ EXIT RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
                         onPlaying()
                     }
