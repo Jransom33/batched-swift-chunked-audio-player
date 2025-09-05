@@ -338,6 +338,13 @@ final class AudioSynchronizer: Sendable {
                 if !isBuffering { 
                     isBuffering = true
                     bufferLog("🔴 MEDIA REQUEST DETECTED BUFFERING - No buffers available to enqueue")
+
+                    // CRITICAL FIX: Pause the synchronizer to prevent time advancement during buffering
+                    if let audioSynchronizer = audioSynchronizer {
+                        audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
+                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopped time progression during media request buffering")
+                    }
+
                     bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                                             bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                         onBuffering() 
@@ -414,6 +421,11 @@ final class AudioSynchronizer: Sendable {
                 if !isBuffering { 
                     isBuffering = true
                     bufferLog("🔴 RESTART REQUEST DETECTED BUFFERING - No buffers available to enqueue")
+
+                    // CRITICAL FIX: Pause the synchronizer to prevent time advancement during buffering
+                    audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
+                    bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopped time progression during restart request buffering")
+
                     bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                                             bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                         onBuffering() 
