@@ -338,13 +338,6 @@ final class AudioSynchronizer: Sendable {
                 if !isBuffering { 
                     isBuffering = true
                     bufferLog("🔴 MEDIA REQUEST DETECTED BUFFERING - No buffers available to enqueue")
-                    
-                    // CRITICAL FIX: Pause the synchronizer to prevent time advancement during buffering
-                    if let audioSynchronizer = audioSynchronizer {
-                        audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
-                        bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopped time progression during media request buffering")
-                    }
-                    
                     bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                                             bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                         onBuffering() 
@@ -421,11 +414,6 @@ final class AudioSynchronizer: Sendable {
                 if !isBuffering { 
                     isBuffering = true
                     bufferLog("🔴 RESTART REQUEST DETECTED BUFFERING - No buffers available to enqueue")
-                    
-                    // CRITICAL FIX: Pause the synchronizer to prevent time advancement during buffering
-                    audioSynchronizer.setRate(0.0, time: audioSynchronizer.currentTime())
-                    bufferLog("⏸️ PAUSED SYNCHRONIZER - Stopped time progression during restart request buffering")
-                    
                     bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                                             bufferLog("🌀 [STATE] Calling onBuffering() - UI should show buffering state")
                         onBuffering() 
@@ -800,11 +788,7 @@ final class AudioSynchronizer: Sendable {
                     }
                 } else {
                     // Normal playback path: update time continuously
-                    // Only update time if we're not buffering AND synchronizer is actually playing
-                    // This prevents time updates during initialization when synchronizer.rate = 0
-                    if !isBuffering && audioSynchronizer.rate > 0 {
-                        onTimeChanged(time)
-                    }
+                    onTimeChanged(time)
                 }
             } else {
                 if isBuffering { 
@@ -825,11 +809,7 @@ final class AudioSynchronizer: Sendable {
                         }
                     }
                 }
-                // Only emit time updates if synchronizer is actually playing
-                // This prevents time updates during initialization when synchronizer.rate = 0
-                if let audioSynchronizer = audioSynchronizer, audioSynchronizer.rate > 0 {
-                    onTimeChanged(time)
-                }
+                onTimeChanged(time)
             }
         }
     }
@@ -871,15 +851,33 @@ final class AudioSynchronizer: Sendable {
         let synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
         
-        // CRITICAL FIX: Keep synchronizer paused during initialization to prevent 
-        // premature time progression before media is ready.
-        // The timebase will be properly initialized when playback actually starts.
+        // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
+        // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
+        // but timebase never starts advancing.
         
-        // Keep synchronizer paused and reset timebase until we have sufficient media data
-        // Using setRate(0.0, time: .zero) ensures both paused state AND clean timebase
-        synchronizer.setRate(0.0, time: .zero)
+        // Step 1: Ensure the synchronizer starts its master clock
+        synchronizer.rate = 0.0  // Reset to ensure clean state
         
-        bufferLog("🔧 SYNCHRONIZER INITIALIZED PAUSED AND RESET - Will start when media is ready")
+        // Step 2: Use setRate with explicit time to force timebase initialization
+        // Use the desired rate (which may be 2.0x if set by preferredInitialRate)
+        synchronizer.setRate(desiredRate, time: CMTime.zero)
+        
+        // Step 3: Immediately verify timebase is running by checking currentTime after brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+            guard let self = self else { return }
+            let verificationTime = synchronizer.currentTime()
+            bufferLog("🔧 TIMEBASE VERIFICATION - currentTime after init: \(verificationTime.seconds)s")
+            
+            // If still stuck at zero, try alternative initialization
+            if verificationTime.seconds == 0.0 {
+                bufferLog("⚠️ TIMEBASE STUCK - Attempting alternative initialization")
+                // Force start the synchronizer's master clock with desired rate
+                synchronizer.rate = self.desiredRate
+                synchronizer.setRate(self.desiredRate, time: CMTime.zero)
+            }
+        }
+        
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(\(desiredRate), time: CMTime.zero)")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
