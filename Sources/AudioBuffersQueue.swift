@@ -183,7 +183,13 @@ final class AudioBuffersQueue: Sendable {
     private func updateDuration(for buffer: CMSampleBuffer) {
         // For streaming audio, duration should represent the total accumulated audio
         // This is the end time of the latest buffer added, regardless of what's been consumed
+        let oldDuration = duration.seconds
         duration = buffer.presentationTimeStamp + buffer.duration
+        let newDuration = duration.seconds
+        let bufferStart = buffer.presentationTimeStamp.seconds
+        let bufferEnd = bufferStart + buffer.duration.seconds
+        
+        print("🔧 [DURATION_UPDATE] Buffer [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Duration: \(String(format: "%.3f", oldDuration))s → \(String(format: "%.3f", newDuration))s | Change: +\(String(format: "%.3f", newDuration - oldDuration))s")
     }
     
     private func updateDurationAfterRemoval() {
@@ -192,6 +198,8 @@ final class AudioBuffersQueue: Sendable {
         // The duration represents the total audio content that has been made available,
         // not just what's sitting in our local buffer queue.
         
+        let oldDuration = duration.seconds
+        
         // Only update duration if we have remaining buffers that extend beyond current duration
         if !buffers.isEmpty {
             if let lastAvailableBuffer = buffers.last {
@@ -199,8 +207,13 @@ final class AudioBuffersQueue: Sendable {
                 // Only extend duration, never reduce it
                 if potentialNewDuration > duration {
                     duration = potentialNewDuration
+                    print("🔧 [DURATION_EXTEND] Extended duration from \(String(format: "%.3f", oldDuration))s to \(String(format: "%.3f", duration.seconds))s based on remaining buffer")
+                } else {
+                    print("🔧 [DURATION_KEEP] Duration unchanged at \(String(format: "%.3f", oldDuration))s (remaining buffer doesn't extend beyond current)")
                 }
             }
+        } else {
+            print("🔧 [DURATION_HOLD] Duration held at \(String(format: "%.3f", oldDuration))s (no remaining buffers, renderer still has content)")
         }
         // When buffers.isEmpty, keep duration unchanged - the renderer still has the content
     }

@@ -316,8 +316,16 @@ final class AudioSynchronizer: Sendable {
             
             if shouldFeedRenderer {
                 while let buffer = audioBuffersQueue.peek(), audioRenderer.isReadyForMoreMediaData {
+                    let bufferStart = buffer.presentationTimeStamp.seconds
+                    let bufferEnd = bufferStart + buffer.duration.seconds
+                    let queueDurationBefore = audioBuffersQueue.duration.seconds
+                    
                     audioRenderer.enqueue(buffer)
                     audioBuffersQueue.removeFirst()
+                    
+                    let queueDurationAfter = audioBuffersQueue.duration.seconds
+                    print("🎯 [FEED_TO_RENDERER] Fed buffer [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue duration: \(String(format: "%.3f", queueDurationBefore))s → \(String(format: "%.3f", queueDurationAfter))s")
+                    
                     onDurationChanged(audioBuffersQueue.duration)
                     enqueuedAny = true
                     if diagEnabled {
@@ -722,10 +730,21 @@ final class AudioSynchronizer: Sendable {
                 let queueDuration = audioBuffersQueue.duration.seconds
                 let bufferAhead = queueDuration - currentTime
                 let currentRate = audioSynchronizer.rate
+                let syncCurrentTime = audioSynchronizer.currentTime().seconds
+                
+                // DIAGNOSTIC: Track player time advancement issues
+                if currentTime > queueDuration + 0.01 { // 10ms tolerance
+                    print("🚨 [TIME_OVERSHOOT] Player time \(String(format: "%.3f", currentTime))s > Queue duration \(String(format: "%.3f", queueDuration))s | Overshoot: +\(String(format: "%.3f", currentTime - queueDuration))s | Rate: \(currentRate)x | SyncTime: \(String(format: "%.3f", syncCurrentTime))s")
+                }
+                
+                // DIAGNOSTIC: Track time vs sync time discrepancy
+                let timeDiff = abs(currentTime - syncCurrentTime)
+                if timeDiff > 0.1 { // 100ms discrepancy
+                    print("🚨 [TIME_MISMATCH] ObservedTime: \(String(format: "%.3f", currentTime))s vs SyncTime: \(String(format: "%.3f", syncCurrentTime))s | Diff: \(String(format: "%.3f", timeDiff))s | Rate: \(currentRate)x")
+                }
                 let minimumBufferThreshold: Double = bufferThreshold(for: currentRate) // Dynamic threshold based on rate
                 
                 // 📊 SYNCHRONIZER STATE - Show synchronizer's view of the world
-                let syncCurrentTime = audioSynchronizer.currentTime().seconds
                 let syncRate = audioSynchronizer.rate
                 let rendererHasData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
                 let queueBufferCount = audioBuffersQueue.isEmpty ? 0 : 1 // Simplified since we can't access buffers.count directly
