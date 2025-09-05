@@ -43,14 +43,14 @@ final class AudioSynchronizer: Sendable {
     /// Conservative thresholds to prevent constant buffering on small fluctuations
     /// Uses larger safety margins at higher rates
     private func bufferThreshold(for rate: Float) -> Double {
-        // Proper thresholds that scale with playback rate
-        // Higher speeds need much more buffer for stability
+        // Conservative but reasonable thresholds that scale with playback rate
+        // Balance between stability and responsiveness for TTS streaming
         if rate <= 1.0 {
-            return 2.0  // 1x speed: 2.0s threshold
+            return 1.5  // 1x speed: 1.5s threshold
         } else if rate <= 1.5 {
-            return 3.0  // 1.5x speed: 3.0s threshold
+            return 2.0  // 1.5x speed: 2.0s threshold  
         } else {
-            return 5.0  // 2x+ speed: 5.0s threshold - ensures stable playback
+            return 2.5  // 2x+ speed: 2.5s threshold - stable but responsive
         }
     }
     
@@ -374,13 +374,15 @@ final class AudioSynchronizer: Sendable {
                 if isBuffering { 
                     isBuffering = false 
                     bufferLog("💚 MEDIA REQUEST EXITED BUFFERING - Buffers available, enqueuedAny: \(enqueuedAny)")
-                    
-                    // NOTE: Disabled zombie state detection as it was causing crashes
-                    // The regular buffering logic with minimum thresholds should handle recovery
-                    // if !validateSynchronizerState() {
-                    //     bufferLog("🚨 ZOMBIE STATE ON EXIT - Emergency restart required")
-                    //     restartAudioPipeline()
-                    // }
+                    // FIX: Always resume rate if paused
+                    if audioSynchronizer.rate == 0 {
+                        bufferLog("🎬 EXIT RESUME - Restarting synchronizer at rate \(desiredRate)")
+                        audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                        bufferLog("✅ EXIT RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
+                        onPlaying()
+                    }
+                    // Also try force exit method as backup
+                    forceExitBufferingIfPossible()
                 }
             }
 
@@ -455,6 +457,13 @@ final class AudioSynchronizer: Sendable {
                 if isBuffering { 
                     isBuffering = false 
                     bufferLog("💚 RESTART REQUEST EXITED BUFFERING - Buffers available, enqueuedAny: \(enqueuedAny)")
+                    // FIX: Always resume rate if paused
+                    if audioSynchronizer.rate == 0 {
+                        bufferLog("🎬 EXIT RESUME - Restarting synchronizer at rate \(desiredRate)")
+                        audioSynchronizer.setRate(desiredRate, time: audioSynchronizer.currentTime())
+                        bufferLog("✅ EXIT RESUME - Applied desired rate \(desiredRate), actual rate: \(audioSynchronizer.rate)")
+                        onPlaying()
+                    }
                     // Also try force exit method as backup
                     forceExitBufferingIfPossible()
                 }
@@ -514,9 +523,9 @@ final class AudioSynchronizer: Sendable {
         let currentTime = audioSynchronizer.currentTime().seconds
         let bufferAhead = queueDuration - currentTime
         
-        // MINIMUM BUFFER THRESHOLD: Use desired rate for recovery threshold
-        // During buffering, audioSynchronizer.rate is 0.0, but we need to calculate
-        // threshold based on the rate we'll resume at (desiredRate)
+        // RECOVERY THRESHOLD: Use same threshold as initial playback
+        // The recovery threshold should match the initial playback threshold
+        // to avoid getting stuck in buffering when we have sufficient buffer
         let recoveryRate = desiredRate // Use desired rate, not current rate (which is 0.0)
         let minimumBufferThreshold: Double = bufferThreshold(for: recoveryRate)
         
