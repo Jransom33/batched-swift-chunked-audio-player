@@ -81,7 +81,25 @@ final class AudioBuffersQueue: Sendable {
     }
 
     func removeFirst() {
-        _ = dequeue()
+        withLock {
+            if buffers.isEmpty { return }
+            
+            let queueSizeBefore = buffers.count
+            let queueDurationBefore = duration.seconds
+            
+            let buffer = buffers.removeFirst()
+            let bufferDuration = buffer.duration.seconds
+            let bufferStart = buffer.presentationTimeStamp.seconds
+            let bufferEnd = bufferStart + bufferDuration
+            
+            // CRITICAL FIX: Update duration to reflect remaining buffers
+            updateDurationAfterRemoval()
+            
+            let queueSizeAfter = buffers.count
+            let queueDurationAfter = duration.seconds
+            
+            print("🟥 [QUEUE_REMOVE] Buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
+        }
     }
 
     func removeAll() {
@@ -166,6 +184,25 @@ final class AudioBuffersQueue: Sendable {
         // For streaming audio, duration should represent the total accumulated audio
         // This is the end time of the latest buffer added, regardless of what's been consumed
         duration = buffer.presentationTimeStamp + buffer.duration
+    }
+    
+    private func updateDurationAfterRemoval() {
+        // CRITICAL FIX: Recalculate duration based on remaining buffers
+        // Duration should represent the end time of available (not yet consumed) content
+        if buffers.isEmpty {
+            // No more buffers available - find the last consumed buffer's end time
+            // This ensures duration represents actual available content for playback
+            if let lastBuffer = allBuffers.last {
+                duration = lastBuffer.presentationTimeStamp + lastBuffer.duration
+            } else {
+                duration = .zero
+            }
+        } else {
+            // Duration should be the end time of the last available buffer
+            if let lastBuffer = buffers.last {
+                duration = lastBuffer.presentationTimeStamp + lastBuffer.duration
+            }
+        }
     }
 
     private func withLock<T>(_ perform: () throws -> T) rethrows -> T {
