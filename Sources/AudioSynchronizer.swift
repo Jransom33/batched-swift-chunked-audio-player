@@ -884,33 +884,28 @@ final class AudioSynchronizer: Sendable {
         let synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
         
-        // CRITICAL FIX: Initialize synchronizer timebase immediately after adding renderer
-        // This prevents the "TIME STUCK AT ZERO" zombie state where synchronizer rate > 0 
-        // but timebase never starts advancing.
+        // CRITICAL FIX: Initialize synchronizer timebase but keep it STOPPED
+        // The timebase should not advance until we explicitly start playback
         
-        // Step 1: Ensure the synchronizer starts its master clock
-        synchronizer.rate = 0.0  // Reset to ensure clean state
+        // Step 1: Initialize with rate 0.0 to prevent auto-advancement
+        synchronizer.rate = 0.0
         
-        // Step 2: Use setRate with explicit time to force timebase initialization
-        // Use the desired rate (which may be 2.0x if set by preferredInitialRate)
-        synchronizer.setRate(desiredRate, time: CMTime.zero)
+        // Step 2: Initialize timebase at zero but keep stopped
+        synchronizer.setRate(0.0, time: CMTime.zero)
         
-        // Step 3: Immediately verify timebase is running by checking currentTime after brief delay
+        // Step 3: Verify timebase initialization but expect it to stay at zero
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
             guard let self = self else { return }
             let verificationTime = synchronizer.currentTime()
-            bufferLog("🔧 TIMEBASE VERIFICATION - currentTime after init: \(verificationTime.seconds)s")
+            bufferLog("🔧 TIMEBASE VERIFICATION - currentTime after init: \(verificationTime.seconds)s (should stay near 0.0)")
             
-            // If still stuck at zero, try alternative initialization
-            if verificationTime.seconds == 0.0 {
-                bufferLog("⚠️ TIMEBASE STUCK - Attempting alternative initialization")
-                // Force start the synchronizer's master clock with desired rate
-                synchronizer.rate = self.desiredRate
-                synchronizer.setRate(self.desiredRate, time: CMTime.zero)
+            // Log if timebase is advancing when it shouldn't be
+            if verificationTime.seconds > 0.1 {
+                bufferLog("⚠️ TIMEBASE AUTO-ADVANCING - This may cause timing issues! Time: \(verificationTime.seconds)s")
             }
         }
         
-        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(\(desiredRate), time: CMTime.zero)")
+        bufferLog("🔧 SYNCHRONIZER TIMEBASE INITIALIZED - setRate(0.0, time: CMTime.zero) - timebase stopped until playback starts")
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
