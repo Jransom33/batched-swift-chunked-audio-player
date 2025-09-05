@@ -43,13 +43,14 @@ final class AudioSynchronizer: Sendable {
     /// Conservative thresholds to prevent constant buffering on small fluctuations
     /// Uses larger safety margins at higher rates
     private func bufferThreshold(for rate: Float) -> Double {
-        // Much more conservative: give plenty of headroom
+        // More reasonable thresholds that allow recovery with smaller buffers
+        // At 2x speed, 0.5s buffer = 0.25s real-time safety margin (adequate)
         if rate <= 1.0 {
-            return 1.0  // 1x speed: 1.0s threshold
+            return 0.8  // 1x speed: 0.8s threshold (was 1.0s)
         } else if rate <= 1.5 {
-            return 1.2  // 1.5x speed: 1.2s threshold  
+            return 0.9  // 1.5x speed: 0.9s threshold (was 1.2s)  
         } else {
-            return 1.5  // 2x+ speed: 1.5s threshold (not 3.0s!)
+            return 1.0  // 2x+ speed: 1.0s threshold (was 1.5s)
         }
     }
     
