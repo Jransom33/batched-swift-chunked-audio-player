@@ -187,20 +187,20 @@ final class AudioBuffersQueue: Sendable {
     }
     
     private func updateDurationAfterRemoval() {
-        // CRITICAL FIX: Recalculate duration based on remaining buffers
-        // Duration should represent the end time of available (not yet consumed) content
+        // CRITICAL FIX: Duration should represent actual available playback content
         if buffers.isEmpty {
-            // No more buffers available - find the last consumed buffer's end time
-            // This ensures duration represents actual available content for playback
-            if let lastBuffer = allBuffers.last {
-                duration = lastBuffer.presentationTimeStamp + lastBuffer.duration
-            } else {
-                duration = .zero
-            }
+            // When no buffers are available, duration should reflect the furthest point
+            // we can actually play to based on what's been fed to the renderer
+            // Keep the duration as the last buffer's end time since that content
+            // is still available in the renderer's internal buffer
+            // This prevents premature buffering when renderer has internal content
+            
+            // Duration stays the same - don't reduce it when buffers are consumed
+            // The renderer has internal buffering that continues playback
         } else {
             // Duration should be the end time of the last available buffer
-            if let lastBuffer = buffers.last {
-                duration = lastBuffer.presentationTimeStamp + lastBuffer.duration
+            if let lastAvailableBuffer = buffers.last {
+                duration = lastAvailableBuffer.presentationTimeStamp + lastAvailableBuffer.duration
             }
         }
     }

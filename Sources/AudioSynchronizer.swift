@@ -493,10 +493,11 @@ final class AudioSynchronizer: Sendable {
         let currentTime = audioSynchronizer.currentTime().seconds
         let bufferAhead = queueDuration - currentTime
         
-        // MINIMUM BUFFER THRESHOLD: Use same threshold as initial playback for consistency
-        // This prevents infinite buffering loops where recovery threshold > initial threshold
-        let currentRate = audioSynchronizer.rate
-        let minimumBufferThreshold: Double = bufferThreshold(for: currentRate)
+        // MINIMUM BUFFER THRESHOLD: Use desired rate for recovery threshold
+        // During buffering, audioSynchronizer.rate is 0.0, but we need to calculate
+        // threshold based on the rate we'll resume at (desiredRate)
+        let recoveryRate = desiredRate // Use desired rate, not current rate (which is 0.0)
+        let minimumBufferThreshold: Double = bufferThreshold(for: recoveryRate)
         
         bufferLog("🔍 FORCE EXIT CHECK - hasBuffers: \(hasBuffers), hasSufficientData: \(hasSufficientData), queueDuration: \(String(format: "%.2f", queueDuration))s, currentTime: \(String(format: "%.2f", currentTime))s, bufferAhead: \(String(format: "%.2f", bufferAhead))s")
         bufferLog("📊 PKG_FORCE_EXIT - Queue: \(String(format: "%.2f", queueDuration))s total | Ahead: \(String(format: "%.2f", bufferAhead))s | Player: \(String(format: "%.2f", currentTime))s | Threshold: \(String(format: "%.1f", minimumBufferThreshold))s | isEmpty: \(audioBuffersQueue.isEmpty)")
