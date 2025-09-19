@@ -189,7 +189,7 @@ final class AudioBuffersQueue: Sendable {
         let bufferStart = buffer.presentationTimeStamp.seconds
         let bufferEnd = bufferStart + buffer.duration.seconds
         
-        print("🔧 [DURATION_UPDATE] Buffer [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Duration: \(String(format: "%.3f", oldDuration))s → \(String(format: "%.3f", newDuration))s | Change: +\(String(format: "%.3f", newDuration - oldDuration))s")
+        // print("🔧 [DURATION_UPDATE] Buffer [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Duration: \(String(format: "%.3f", oldDuration))s → \(String(format: "%.3f", newDuration))s | Change: +\(String(format: "%.3f", newDuration - oldDuration))s")
     }
     
     private func updateDurationAfterRemoval() {
@@ -209,7 +209,7 @@ final class AudioBuffersQueue: Sendable {
                     duration = potentialNewDuration
                     print("🔧 [DURATION_EXTEND] Extended duration from \(String(format: "%.3f", oldDuration))s to \(String(format: "%.3f", duration.seconds))s based on remaining buffer")
                 } else {
-                    print("🔧 [DURATION_KEEP] Duration unchanged at \(String(format: "%.3f", oldDuration))s (remaining buffer doesn't extend beyond current)")
+                    // print("🔧 [DURATION_KEEP] Duration unchanged at \(String(format: "%.3f", oldDuration))s (remaining buffer doesn't extend beyond current)")
                 }
             }
         } else {
