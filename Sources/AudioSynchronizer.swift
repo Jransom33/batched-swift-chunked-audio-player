@@ -104,7 +104,7 @@ final class AudioSynchronizer: Sendable {
     }
 
     // MARK: - Diagnostics (lightweight)
-    private nonisolated(unsafe) var diagEnabled = true
+    private nonisolated(unsafe) var diagEnabled = false
     private nonisolated(unsafe) var diagLastTick: Date = .distantPast
     private nonisolated(unsafe) var diagBytesReceivedThisTick: Int = 0
     
@@ -131,6 +131,11 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var diagBuffersEnqueuedThisTick: Int = 0
     private nonisolated(unsafe) var diagEnqueueLoopsThisTick: Int = 0
     private nonisolated(unsafe) var diagLastQueueDurationSeconds: Double = 0
+
+    // MARK: - Event-driven logging state
+    private nonisolated(unsafe) var lastRendererReady: Bool? = nil
+    private nonisolated(unsafe) var lastBufferAheadBelowThreshold: Bool? = nil
+    private nonisolated(unsafe) var lastLoggedRate: Float? = nil
 
     private func emitDiagnosticsIfNeeded(context: String) {
         guard diagEnabled else { return }
@@ -753,27 +758,33 @@ final class AudioSynchronizer: Sendable {
                 let currentRate = audioSynchronizer.rate
                 let syncCurrentTime = audioSynchronizer.currentTime().seconds
                 
-                // DIAGNOSTIC: Track player time advancement issues
+                // Event-driven anomalies only
                 if currentTime > queueDuration + 0.01 { // 10ms tolerance
                     print("🚨 [TIME_OVERSHOOT] Player time \(String(format: "%.3f", currentTime))s > Queue duration \(String(format: "%.3f", queueDuration))s | Overshoot: +\(String(format: "%.3f", currentTime - queueDuration))s | Rate: \(currentRate)x | SyncTime: \(String(format: "%.3f", syncCurrentTime))s")
                 }
-                
-                // DIAGNOSTIC: Track time vs sync time discrepancy
                 let timeDiff = abs(currentTime - syncCurrentTime)
                 if timeDiff > 0.1 { // 100ms discrepancy
                     print("🚨 [TIME_MISMATCH] ObservedTime: \(String(format: "%.3f", currentTime))s vs SyncTime: \(String(format: "%.3f", syncCurrentTime))s | Diff: \(String(format: "%.3f", timeDiff))s | Rate: \(currentRate)x")
                 }
                 let minimumBufferThreshold: Double = bufferThreshold(for: currentRate) // Dynamic threshold based on rate
-                
-                // 📊 SYNCHRONIZER STATE - Show synchronizer's view of the world
-                let syncRate = audioSynchronizer.rate
                 let rendererHasData = audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
-                let queueBufferCount = audioBuffersQueue.isEmpty ? 0 : 1 // Simplified since we can't access buffers.count directly
-                
-                print("🟪 [SYNC_STATE] Time: \(String(format: "%.3f", syncCurrentTime))s | Rate: \(syncRate)x | Queue: \(queueBufferCount) buffers, \(String(format: "%.2f", queueDuration))s | Ahead: \(String(format: "%.2f", bufferAhead))s | Renderer ready: \(rendererHasData)")
-                
-                // 📊 PACKAGE BUFFER STATUS - Show what the package actually sees
-                bufferLog("📊 PKG_BUFFER - Queue: \(String(format: "%.2f", queueDuration))s total | Ahead: \(String(format: "%.2f", bufferAhead))s | Player: \(String(format: "%.2f", currentTime))s | Threshold: \(String(format: "%.1f", minimumBufferThreshold))s | Rate: \(currentRate)x | Empty: \(audioBuffersQueue.isEmpty)")
+
+                // Edge: renderer readiness flip
+                if lastRendererReady == nil || lastRendererReady != rendererHasData {
+                    print("🟪 [RENDERER_READY] \(rendererHasData)")
+                    lastRendererReady = rendererHasData
+                }
+                // Edge: buffer ahead below threshold flip
+                let isBelowThreshold = bufferAhead < minimumBufferThreshold
+                if lastBufferAheadBelowThreshold == nil || lastBufferAheadBelowThreshold != isBelowThreshold {
+                    print("🟪 [BUFFER_LEVEL] belowThreshold=\(isBelowThreshold) ahead=\(String(format: "%.2f", bufferAhead))s threshold=\(String(format: "%.1f", minimumBufferThreshold))s")
+                    lastBufferAheadBelowThreshold = isBelowThreshold
+                }
+                // Edge: rate change (already handled elsewhere, but ensure emitted if missed)
+                if lastLoggedRate == nil || lastLoggedRate != currentRate {
+                    print("🟪 [RATE_STATE] rate=\(currentRate)x time=\(String(format: "%.3f", syncCurrentTime))s")
+                    lastLoggedRate = currentRate
+                }
                 
                 // Check if we're running low on buffer OR completely caught up
                 // Add hysteresis: only trigger buffering if significantly below threshold
