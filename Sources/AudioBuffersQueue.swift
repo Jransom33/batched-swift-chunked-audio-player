@@ -46,7 +46,7 @@ final class AudioBuffersQueue: Sendable {
             let queueSizeAfter = buffers.count
             let queueDurationAfter = duration.seconds
             
-            print("🟦 [QUEUE_ADD] Buffer: \(String(format: "%.3f", seconds))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
+            // print("🟦 [QUEUE_ADD] Buffer: \(String(format: "%.3f", seconds))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
             
             // Emit minimal log only when seconds is non-trivial
             if seconds > 0.0 {
@@ -74,7 +74,7 @@ final class AudioBuffersQueue: Sendable {
             let queueSizeAfter = buffers.count
             let queueDurationAfter = duration.seconds
             
-            print("🟥 [QUEUE_REMOVE] Buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
+            // print("🟥 [QUEUE_REMOVE] Buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
             
             return buffer
         }
@@ -98,7 +98,7 @@ final class AudioBuffersQueue: Sendable {
             let queueSizeAfter = buffers.count
             let queueDurationAfter = duration.seconds
             
-            print("🟥 [QUEUE_REMOVE] Buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
+            // print("🟥 [QUEUE_REMOVE] Buffer: \(String(format: "%.3f", bufferDuration))s [\(String(format: "%.3f", bufferStart))s → \(String(format: "%.3f", bufferEnd))s] | Queue: \(queueSizeBefore) → \(queueSizeAfter) buffers | Total: \(String(format: "%.2f", queueDurationBefore))s → \(String(format: "%.2f", queueDurationAfter))s")
         }
     }
 
