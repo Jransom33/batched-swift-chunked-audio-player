@@ -632,7 +632,7 @@ final class AudioSynchronizer: Sendable {
             bufferLog("🎬 [STATE] Calling onPlaying() - UI should show playing state")
             onPlaying()
         } else if enqueuedAny {
-            bufferLog("📤 ENQUEUED DATA - Synchronizer running at rate: \(synchronizer.rate)")
+            // bufferLog("📤 ENQUEUED DATA - Synchronizer running at rate: \(synchronizer.rate)")
             // NOTE: Disabled zombie state check to prevent crashes
             // The buffering logic with minimum thresholds should handle playback issues
         } else {
