@@ -3,6 +3,7 @@ import os
 
 final class AudioBuffersQueue: Sendable {
     private let audioDescription: AudioStreamBasicDescription
+    private let cachedFormatDescription: CMFormatDescription
     private nonisolated(unsafe) var allBuffers = [CMSampleBuffer]()
     private nonisolated(unsafe) var buffers = [CMSampleBuffer]()
     private let lock = NSLock()
@@ -13,8 +14,9 @@ final class AudioBuffersQueue: Sendable {
         withLock { buffers.isEmpty }
     }
 
-    init(audioDescription: AudioStreamBasicDescription) {
+    init(audioDescription: AudioStreamBasicDescription) throws {
         self.audioDescription = audioDescription
+        self.cachedFormatDescription = try CMFormatDescription(audioStreamBasicDescription: audioDescription)
         self.duration = CMTime(value: 0, timescale: Int32(audioDescription.mSampleRate))
     }
 
@@ -135,7 +137,7 @@ final class AudioBuffersQueue: Sendable {
         packetDescriptions: UnsafePointer<AudioStreamPacketDescription>?
     ) throws -> CMSampleBuffer? {
         guard let blockBuffer = try makeBlockBuffer(from: data) else { return nil }
-        let formatDescription = try CMFormatDescription(audioStreamBasicDescription: audioDescription)
+        let formatDescription = cachedFormatDescription
         var sampleBuffer: CMSampleBuffer?
         let createStatus = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
             allocator: kCFAllocatorDefault,

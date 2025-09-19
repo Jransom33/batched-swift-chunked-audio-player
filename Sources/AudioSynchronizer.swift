@@ -941,7 +941,13 @@ final class AudioSynchronizer: Sendable {
         
         audioRenderer = renderer
         audioSynchronizer = synchronizer
-        audioBuffersQueue = AudioBuffersQueue(audioDescription: asbd)
+        do {
+            audioBuffersQueue = try AudioBuffersQueue(audioDescription: asbd)
+        } catch {
+            bufferLog("❌ FAILED TO CREATE AudioBuffersQueue - Error: \(error)")
+            onError(AudioPlayerError.other(error))
+            return
+        }
         
         bufferLog("🎬 AUDIO RENDERER CREATED - Starting media data requests")
         observeRenderer(renderer, synchronizer: synchronizer)
