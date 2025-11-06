@@ -132,6 +132,16 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var diagEnqueueLoopsThisTick: Int = 0
     private nonisolated(unsafe) var diagLastQueueDurationSeconds: Double = 0
 
+    // MARK: - Stream metadata tracking
+    private nonisolated(unsafe) var audioStreamDescription: AudioStreamBasicDescription?
+    private nonisolated(unsafe) var packetTableInfo: AudioFilePacketTableInfo?
+    private nonisolated(unsafe) var totalPacketFramesReceived: Int64 = 0
+    private nonisolated(unsafe) var totalPacketBatches: Int64 = 0
+    private nonisolated(unsafe) var frameComputationFallbackLogged = false
+    private nonisolated(unsafe) var missingPacketDescriptionsLogged = false
+    private nonisolated(unsafe) var packetInfoStatusCache: [AudioFilePropertyID: OSStatus] = [:]
+    private nonisolated(unsafe) var paddingSummaryLogged = false
+
     // MARK: - Event-driven logging state
     private nonisolated(unsafe) var lastRendererReady: Bool? = nil
     private nonisolated(unsafe) var lastBufferAheadBelowThreshold: Bool? = nil
@@ -204,6 +214,14 @@ final class AudioSynchronizer: Sendable {
     func prepare(type: AudioFileTypeID? = nil) {
         invalidate()
         receiveComplete = false
+        audioStreamDescription = nil
+        packetTableInfo = nil
+        totalPacketFramesReceived = 0
+        totalPacketBatches = 0
+        frameComputationFallbackLogged = false
+        missingPacketDescriptionsLogged = false
+        packetInfoStatusCache = [:]
+        paddingSummaryLogged = false
         audioFileStream = AudioFileStream(type: type, queue: queue) { [weak self] error in
             self?.onError(error)
         } receiveASBD: { [weak self] asbd in
@@ -215,6 +233,8 @@ final class AudioSynchronizer: Sendable {
                 numberOfPackets: numberOfPackets,
                 packets: packets
             )
+        } receivePacketTableInfo: { [weak self] info, propertyID, status in
+            self?.handlePacketTableInfo(info, propertyID: propertyID, status: status)
         }
         audioFileStream?.open()
         bufferLog("🎵 AUDIO STREAM PREPARED - Ready to receive audio data")
@@ -294,6 +314,9 @@ final class AudioSynchronizer: Sendable {
     func finish() {
         audioFileStream?.finishDataParsing()
         receiveComplete = true
+        queue.async { [weak self] in
+            self?.logPaddingSummaryIfPossible(reason: "finish")
+        }
     }
 
     func invalidate(_ completion: @escaping @Sendable () -> Void = {}) {
@@ -908,7 +931,12 @@ final class AudioSynchronizer: Sendable {
     // MARK: - AudioFileStream Callbacks
     
     private func handleAudioStreamDescription(asbd: AudioStreamBasicDescription) {
-        bufferLog("🎧 RECEIVED AUDIO DESCRIPTION - Format: \(asbd.mFormatID), Channels: \(asbd.mChannelsPerFrame), SampleRate: \(asbd.mSampleRate)")
+        audioStreamDescription = asbd
+        let formatLabel = formatFourCC(asbd.mFormatID)
+        bufferLog("🎧 RECEIVED AUDIO DESCRIPTION - Format: \(formatLabel) (\(asbd.mFormatID)), Channels: \(asbd.mChannelsPerFrame), SampleRate: \(asbd.mSampleRate), FramesPerPacket: \(asbd.mFramesPerPacket)")
+        if asbd.mFormatID == kAudioFormatMPEGLayer3 {
+            bufferLog("💽 MP3 FORMAT DETECTED - Padding diagnostics enabled for this stream")
+        }
         
         // Create and setup audio renderer and synchronizer
         let renderer = AVSampleBufferAudioRenderer()
@@ -954,6 +982,34 @@ final class AudioSynchronizer: Sendable {
         startRequestingMediaData(renderer)
     }
     
+    private func handlePacketTableInfo(
+        _ info: AudioFilePacketTableInfo?,
+        propertyID: AudioFilePropertyID,
+        status: OSStatus
+    ) {
+        if let cachedStatus = packetInfoStatusCache[propertyID],
+           cachedStatus == status,
+           status != noErr {
+            return
+        }
+        packetInfoStatusCache[propertyID] = status
+        
+        guard status == noErr, let info else {
+            bufferLog("ℹ️ PACKET TABLE INFO UNAVAILABLE (\(propertyName(for: propertyID))) - status: \(osStatusDescription(status))")
+            return
+        }
+        
+        if let existingInfo = packetTableInfo,
+           packetTableInfoEquals(existingInfo, info) {
+            return
+        }
+        
+        packetTableInfo = info
+        logPacketTableInfo(info, sourceProperty: propertyID)
+        logCumulativeFrameStats(context: "packetTableInfo")
+        logPaddingSummaryIfPossible(reason: "packetTableInfo")
+    }
+    
     private func handleAudioStreamPackets(
         numberOfBytes: UInt32,
         bytes: UnsafeRawPointer,
@@ -965,6 +1021,36 @@ final class AudioSynchronizer: Sendable {
         guard let audioBuffersQueue = self.audioBuffersQueue else {
             bufferLog("❌ PACKETS DROPPED - No AudioBuffersQueue")
             return
+        }
+        
+        if let asbd = audioStreamDescription,
+           asbd.mFormatID == kAudioFormatMPEGLayer3,
+           asbd.mSampleRate > 0 {
+            if let framesInBatch = framesFromPackets(
+                numberOfPackets: numberOfPackets,
+                packets: packets,
+                asbd: asbd
+            ) {
+                totalPacketFramesReceived += framesInBatch
+                totalPacketBatches += 1
+                
+                if shouldLogPacketBatch(batch: totalPacketBatches) {
+                    let batchSeconds = framesToSecondsString(framesInBatch, sampleRate: asbd.mSampleRate)
+                    let totalSeconds = framesToSecondsString(totalPacketFramesReceived, sampleRate: asbd.mSampleRate)
+                    bufferLog("🧮 FRAME BATCH #\(totalPacketBatches) - +\(framesInBatch) frames (\(batchSeconds)s); cumulative \(totalPacketFramesReceived) frames (\(totalSeconds)s)")
+                }
+                
+                if packets == nil, !missingPacketDescriptionsLogged {
+                    missingPacketDescriptionsLogged = true
+                    bufferLog("ℹ️ PACKET DESCRIPTIONS ABSENT - Assuming \(asbd.mFramesPerPacket) frames/packet; trailing padding detection may be approximate.")
+                }
+                
+                logCumulativeFrameStats(context: "packets_batch \(totalPacketBatches)")
+                logPaddingSummaryIfPossible(reason: "packets_batch")
+            } else if !frameComputationFallbackLogged {
+                frameComputationFallbackLogged = true
+                bufferLog("⚠️ FRAME COUNT UNAVAILABLE - framesPerPacket=0 and no packet descriptions; cannot evaluate MP3 padding.")
+            }
         }
         
         do {
@@ -994,4 +1080,203 @@ final class AudioSynchronizer: Sendable {
         }
     }
 
+    // MARK: - Padding diagnostics helpers
+
+    private func framesFromPackets(
+        numberOfPackets: UInt32,
+        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?,
+        asbd: AudioStreamBasicDescription
+    ) -> Int64? {
+        if numberOfPackets == 0 { return 0 }
+
+        if let packets = packets {
+            let descriptions = UnsafeBufferPointer(start: packets, count: Int(numberOfPackets))
+            var totalFrames: Int64 = 0
+
+            for description in descriptions {
+                if description.mVariableFramesInPacket > 0 {
+                    totalFrames += Int64(description.mVariableFramesInPacket)
+                } else if asbd.mFramesPerPacket > 0 {
+                    totalFrames += Int64(asbd.mFramesPerPacket)
+                } else {
+                    return nil
+                }
+            }
+
+            return totalFrames
+        } else {
+            guard asbd.mFramesPerPacket > 0 else { return nil }
+            return Int64(numberOfPackets) * Int64(asbd.mFramesPerPacket)
+        }
+    }
+
+    private func shouldLogPacketBatch(batch: Int64) -> Bool {
+        batch <= 5 || batch % 25 == 0
+    }
+
+    private func framesToSecondsString(_ frames: Int64, sampleRate: Double) -> String {
+        guard sampleRate > 0 else { return "n/a" }
+        let seconds = Double(frames) / sampleRate
+        return String(format: "%.6f", seconds)
+    }
+
+    private func describeFrames(_ frames: Int64?, sampleRate: Double) -> String {
+        guard let frames else { return "unknown" }
+        let seconds = framesToSecondsString(frames, sampleRate: sampleRate)
+        return "\(frames) frames (\(seconds)s)"
+    }
+
+    private func logPacketTableInfo(_ info: AudioFilePacketTableInfo, sourceProperty: AudioFilePropertyID) {
+        let primingRaw = Int64(info.mPrimingFrames)
+        let remainderRaw = Int64(info.mRemainderFrames)
+        let validRaw = info.mNumberValidFrames
+
+        bufferLog("🧾 PACKET TABLE INFO (\(propertyName(for: sourceProperty))) - priming: \(primingRaw) frames, remainder: \(remainderRaw) frames, valid: \(validRaw) frames")
+
+        if let asbd = audioStreamDescription, asbd.mSampleRate > 0 {
+            let sampleRate = asbd.mSampleRate
+            let primingDescription = describeFrames(info.mPrimingFrames >= 0 ? Int64(info.mPrimingFrames) : nil, sampleRate: sampleRate)
+            let remainderDescription = describeFrames(info.mRemainderFrames >= 0 ? Int64(info.mRemainderFrames) : nil, sampleRate: sampleRate)
+            let validDescription = describeFrames(info.mNumberValidFrames >= 0 ? info.mNumberValidFrames : nil, sampleRate: sampleRate)
+            bufferLog("🧾 PACKET TABLE INFO (seconds) - priming: \(primingDescription), remainder: \(remainderDescription), valid: \(validDescription)")
+        } else {
+            bufferLog("🧾 PACKET TABLE INFO - Sample rate unavailable; cannot convert padding frames to seconds yet")
+        }
+
+        if info.mPrimingFrames > 0 || info.mRemainderFrames > 0 {
+            bufferLog("⚠️ PADDING METADATA PRESENT - Leading priming frames: \(info.mPrimingFrames), trailing remainder frames: \(info.mRemainderFrames)")
+        } else if info.mPrimingFrames == 0 && info.mRemainderFrames == 0 {
+            bufferLog("✅ PACKET TABLE INDICATES NO MP3 PADDING - Priming and remainder frames both zero")
+        } else if info.mPrimingFrames < 0 || info.mRemainderFrames < 0 {
+            bufferLog("ℹ️ PACKET TABLE DOES NOT REPORT PADDING - Priming (\(info.mPrimingFrames)) or remainder (\(info.mRemainderFrames)) frames marked as unknown")
+        }
+    }
+
+    private func logCumulativeFrameStats(context: String) {
+        guard let asbd = audioStreamDescription,
+              asbd.mFormatID == kAudioFormatMPEGLayer3,
+              asbd.mSampleRate > 0 else { return }
+
+        let totalSeconds = framesToSecondsString(totalPacketFramesReceived, sampleRate: asbd.mSampleRate)
+
+        if let info = packetTableInfo,
+           info.mNumberValidFrames >= 0,
+           info.mPrimingFrames >= 0,
+           info.mRemainderFrames >= 0 {
+            let primingFrames = Int64(info.mPrimingFrames)
+            let remainderFrames = Int64(info.mRemainderFrames)
+            let expectedTotal = info.mNumberValidFrames + primingFrames + remainderFrames
+            let delta = totalPacketFramesReceived - expectedTotal
+            bufferLog(
+                "🧮 FRAME TALLY [\(context)] - observed \(totalPacketFramesReceived) frames (\(totalSeconds)s); expected \(expectedTotal) frames; delta \(delta) frames (\(framesToSecondsString(delta, sampleRate: asbd.mSampleRate))s)"
+            )
+        } else if let info = packetTableInfo {
+            bufferLog(
+                "🧮 FRAME TALLY [\(context)] - observed \(totalPacketFramesReceived) frames (\(totalSeconds)s); packet table present but contains unknown values (priming \(info.mPrimingFrames), remainder \(info.mRemainderFrames), valid \(info.mNumberValidFrames))"
+            )
+        } else {
+            bufferLog("🧮 FRAME TALLY [\(context)] - observed \(totalPacketFramesReceived) frames (\(totalSeconds)s); packet table info pending")
+        }
+    }
+
+    private func logPaddingSummaryIfPossible(reason: String) {
+        guard !paddingSummaryLogged else { return }
+        guard receiveComplete else { return }
+        guard let asbd = audioStreamDescription, asbd.mSampleRate > 0 else { return }
+
+        guard let info = packetTableInfo else {
+            bufferLog("ℹ️ PADDING SUMMARY (\(reason)) - Stream finished but packet table info unavailable; cannot confirm MP3 padding.")
+            paddingSummaryLogged = true
+            return
+        }
+
+        guard info.mPrimingFrames >= 0,
+              info.mRemainderFrames >= 0,
+              info.mNumberValidFrames >= 0 else {
+            bufferLog("ℹ️ PADDING SUMMARY (\(reason)) - Packet table contains unknown values (priming \(info.mPrimingFrames), remainder \(info.mRemainderFrames), valid \(info.mNumberValidFrames)); unable to compute final padding.")
+            paddingSummaryLogged = true
+            return
+        }
+
+        let sampleRate = asbd.mSampleRate
+        let primingFrames = Int64(info.mPrimingFrames)
+        let remainderFrames = Int64(info.mRemainderFrames)
+        let validFrames = info.mNumberValidFrames
+        let expectedTotal = validFrames + primingFrames + remainderFrames
+        let delta = totalPacketFramesReceived - expectedTotal
+
+        bufferLog(
+            "🏁 PADDING SUMMARY (\(reason)) - priming \(describeFrames(primingFrames, sampleRate: sampleRate)), remainder \(describeFrames(remainderFrames, sampleRate: sampleRate)), valid \(describeFrames(validFrames, sampleRate: sampleRate)), observed \(totalPacketFramesReceived) frames (\(framesToSecondsString(totalPacketFramesReceived, sampleRate: sampleRate))s), delta \(delta) frames (\(framesToSecondsString(delta, sampleRate: sampleRate))s)"
+        )
+
+        if primingFrames > 0 || remainderFrames > 0 {
+            bufferLog("⚠️ FINAL PADDING DETECTED - Encoder priming \(primingFrames) frames, trailing padding \(remainderFrames) frames")
+        } else {
+            bufferLog("✅ FINAL PADDING SUMMARY - Packet table reports zero priming and remainder frames")
+        }
+
+        paddingSummaryLogged = true
+    }
+
+    private func packetTableInfoEquals(_ lhs: AudioFilePacketTableInfo, _ rhs: AudioFilePacketTableInfo) -> Bool {
+        lhs.mPrimingFrames == rhs.mPrimingFrames &&
+        lhs.mRemainderFrames == rhs.mRemainderFrames &&
+        lhs.mNumberValidFrames == rhs.mNumberValidFrames
+    }
+
+    private func propertyName(for propertyID: AudioFilePropertyID) -> String {
+        switch propertyID {
+        case kAudioFileStreamProperty_DataFormat:
+            return "DataFormat"
+        case kAudioFileStreamProperty_ReadyToProducePackets:
+            return "ReadyToProducePackets"
+        case kAudioFileStreamProperty_PacketTableInfo:
+            return "PacketTableInfo"
+        default:
+            return String(format: "0x%08X", propertyID)
+        }
+    }
+
+    private func osStatusDescription(_ status: OSStatus) -> String {
+        if status == noErr { return "noErr" }
+        let code = UInt32(bitPattern: status)
+        var characters: [Character] = []
+        var isPrintable = true
+
+        for shift in stride(from: 24, through: 0, by: -8) {
+            let value = (code >> UInt32(shift)) & 0xFF
+            guard let scalar = UnicodeScalar(value), scalar.isASCII else {
+                isPrintable = false
+                break
+            }
+            if scalar.value >= 0x20 && scalar.value <= 0x7E {
+                characters.append(Character(scalar))
+            } else {
+                isPrintable = false
+                break
+            }
+        }
+
+        if isPrintable, !characters.isEmpty {
+            return "'\(String(characters))'"
+        }
+
+        return String(format: "0x%08X", code)
+    }
+
+    private func formatFourCC(_ value: UInt32) -> String {
+        var characters: [Character] = []
+        for shift in stride(from: 24, through: 0, by: -8) {
+            let component = (value >> UInt32(shift)) & 0xFF
+            if let scalar = UnicodeScalar(component),
+               scalar.isASCII,
+               scalar.value >= 0x20,
+               scalar.value <= 0x7E {
+                characters.append(Character(scalar))
+            } else {
+                characters.append("?")
+            }
+        }
+        return String(characters)
+    }
 }

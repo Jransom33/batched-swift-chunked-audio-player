@@ -10,10 +10,16 @@ final class AudioFileStream: Sendable {
         _ numberOfPackets: UInt32,
         _ packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
     ) -> Void
+    typealias PacketTableInfoCallback = @Sendable (
+        _ info: AudioFilePacketTableInfo?,
+        _ sourceProperty: AudioFilePropertyID,
+        _ status: OSStatus
+    ) -> Void
 
     private let receiveError: ErrorCallback
     private let receiveASBD: ASBDCallback
     private let receivePackets: PacketsCallback
+    private let receivePacketTableInfo: PacketTableInfoCallback
 
     private let syncQueue: DispatchQueue
 
@@ -26,13 +32,15 @@ final class AudioFileStream: Sendable {
         queue: DispatchQueue,
         receiveError: @escaping ErrorCallback,
         receiveASBD: @escaping ASBDCallback,
-        receivePackets: @escaping PacketsCallback
+        receivePackets: @escaping PacketsCallback,
+        receivePacketTableInfo: @escaping PacketTableInfoCallback = { _, _, _ in }
     ) {
         self.fileTypeID = type
         self.syncQueue = queue
         self.receiveError = receiveError
         self.receiveASBD = receiveASBD
         self.receivePackets = receivePackets
+        self.receivePacketTableInfo = receivePacketTableInfo
     }
 
     func open() {
@@ -80,14 +88,22 @@ final class AudioFileStream: Sendable {
     // MARK: - Private
 
     private func onFileStreamPropertyReceived(propertyID: AudioFilePropertyID) {
-        guard let audioStreamID = audioStreamID, propertyID == kAudioFileStreamProperty_DataFormat else { return }
-        var asbdSize: UInt32 = 0
-        var asbd = AudioStreamBasicDescription()
-        let getInfoStatus = AudioFileStreamGetPropertyInfo(audioStreamID, propertyID, &asbdSize, nil)
-        guard getInfoStatus == noErr else { return receiveError(.status(getInfoStatus)) }
-        let getPropertyStatus = AudioFileStreamGetProperty(audioStreamID, propertyID, &asbdSize, &asbd)
-        guard getPropertyStatus == noErr else { return receiveError(.status(getPropertyStatus)) }
-        receiveASBD(asbd)
+        guard let audioStreamID = audioStreamID else { return }
+        switch propertyID {
+        case kAudioFileStreamProperty_DataFormat:
+            var asbdSize: UInt32 = 0
+            var asbd = AudioStreamBasicDescription()
+            let getInfoStatus = AudioFileStreamGetPropertyInfo(audioStreamID, propertyID, &asbdSize, nil)
+            guard getInfoStatus == noErr else { return receiveError(.status(getInfoStatus)) }
+            let getPropertyStatus = AudioFileStreamGetProperty(audioStreamID, propertyID, &asbdSize, &asbd)
+            guard getPropertyStatus == noErr else { return receiveError(.status(getPropertyStatus)) }
+            receiveASBD(asbd)
+        case kAudioFileStreamProperty_ReadyToProducePackets,
+             kAudioFileStreamProperty_PacketTableInfo:
+            emitPacketTableInfo(sourceProperty: propertyID, audioStreamID: audioStreamID)
+        default:
+            break
+        }
     }
 
     private func onFileStreamPacketsReceived(
@@ -97,5 +113,38 @@ final class AudioFileStream: Sendable {
         packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
     ) {
         receivePackets(numberOfBytes, bytes, numberOfPackets, packets)
+    }
+
+    private func emitPacketTableInfo(sourceProperty: AudioFilePropertyID, audioStreamID: AudioFileStreamID) {
+        var propertySize: UInt32 = 0
+        let propertyInfoStatus = AudioFileStreamGetPropertyInfo(
+            audioStreamID,
+            kAudioFileStreamProperty_PacketTableInfo,
+            &propertySize,
+            nil
+        )
+        guard propertyInfoStatus == noErr else {
+            receivePacketTableInfo(nil, sourceProperty, propertyInfoStatus)
+            return
+        }
+        guard propertySize == MemoryLayout<AudioFilePacketTableInfo>.size else {
+            receivePacketTableInfo(nil, sourceProperty, kAudio_ParamError)
+            return
+        }
+
+        var packetInfo = AudioFilePacketTableInfo()
+        var actualSize = propertySize
+        let propertyStatus = AudioFileStreamGetProperty(
+            audioStreamID,
+            kAudioFileStreamProperty_PacketTableInfo,
+            &actualSize,
+            &packetInfo
+        )
+        guard propertyStatus == noErr else {
+            receivePacketTableInfo(nil, sourceProperty, propertyStatus)
+            return
+        }
+
+        receivePacketTableInfo(packetInfo, sourceProperty, propertyStatus)
     }
 }

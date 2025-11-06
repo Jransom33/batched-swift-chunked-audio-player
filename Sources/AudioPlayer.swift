@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import AVFoundation
 import AudioToolbox
-
+// ***Check to see if making it so that the when the chunk is completed that there is a callback that will log it. Add that functionality to this project and then add a stop watch to the player to see the comparison of clock time to the chunk finishing time. If they are different idk what the hell is going on but something is wrong. 
 @MainActor
 public final class AudioPlayer: ObservableObject, Sendable {
     private let timeUpdateInterval: CMTime
