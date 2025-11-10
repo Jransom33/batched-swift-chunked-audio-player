@@ -58,21 +58,13 @@ public final class AudioPlayer: ObservableObject, Sendable {
     }
 
     public func start(_ stream: AnyPublisher<Data, Error>, type: AudioFileTypeID? = nil) {
-        let chunkStream = stream
-            .map { AudioStreamChunk(data: $0) }
-            .stream()
-        start(chunkStream, type: type)
+        start(stream.stream(), type: type)
     }
 
     public func start(_ stream: AsyncThrowingStream<Data, Error>, type: AudioFileTypeID? = nil) {
-        let chunkStream = makeChunkStream(from: stream)
-        start(chunkStream, type: type)
-    }
-
-    public func start(_ stream: AsyncThrowingStream<AudioStreamChunk, Error>, type: AudioFileTypeID? = nil) {
         stop()
         prepareSynchronizer(type: type)
-        startReceivingChunks(from: stream)
+        startReceivingData(from: stream)
     }
 
     public func stop() {
@@ -113,35 +105,17 @@ public final class AudioPlayer: ObservableObject, Sendable {
         task = nil
     }
 
-    private func startReceivingChunks(from stream: AsyncThrowingStream<AudioStreamChunk, Error>) {
+    private func startReceivingData(from stream: AsyncThrowingStream<Data, Error>) {
         cancelDataTask()
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                for try await chunk in stream {
-                    synchronizer?.receive(chunk: chunk)
+                for try await data in stream {
+                    synchronizer?.receive(data: data)
                 }
                 synchronizer?.finish()
             } catch {
                 setCurrentError(AudioPlayerError(error: error))
-            }
-        }
-    }
-
-    private func makeChunkStream(from dataStream: AsyncThrowingStream<Data, Error>) -> AsyncThrowingStream<AudioStreamChunk, Error> {
-        AsyncThrowingStream<AudioStreamChunk, Error> { continuation in
-            let bridgeTask = Task {
-                do {
-                    for try await data in dataStream {
-                        continuation.yield(AudioStreamChunk(data: data))
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in
-                bridgeTask.cancel()
             }
         }
     }

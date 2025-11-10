@@ -132,62 +132,6 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var diagEnqueueLoopsThisTick: Int = 0
     private nonisolated(unsafe) var diagLastQueueDurationSeconds: Double = 0
 
-// MARK: - Trim metadata tracking
-private struct PendingChunkTrim {
-    var leadingRemaining: Int
-    var trailingRemaining: Int
-    var framesRemaining: Int?
-    let sampleRate: Double?
-
-    mutating func instructionForBuffer(sampleCount: Int) -> AudioBuffersQueue.SampleBufferTrimInstruction? {
-        guard sampleCount > 0 else { return nil }
-
-        var leading = 0
-        if leadingRemaining > 0 {
-            leading = min(leadingRemaining, sampleCount)
-            leadingRemaining -= leading
-        }
-
-        var trailing = 0
-        if let framesRemaining = framesRemaining {
-            let after = max(framesRemaining - sampleCount, 0)
-            trailing = max(0, trailingRemaining - after)
-            trailing = min(trailing, sampleCount - leading)
-            trailingRemaining -= trailing
-            self.framesRemaining = after
-        } else {
-            // Without total frame knowledge we cannot reliably trim the tail.
-            trailingRemaining = 0
-            self.framesRemaining = 0
-        }
-
-        let keep = sampleCount - leading - trailing
-        if keep <= 0 {
-            return AudioBuffersQueue.SampleBufferTrimInstruction(
-                leadingFrames: sampleCount,
-                trailingFrames: 0
-            )
-        }
-
-        if leading == 0 && trailing == 0 {
-            return nil
-        }
-
-        return AudioBuffersQueue.SampleBufferTrimInstruction(
-            leadingFrames: leading,
-            trailingFrames: trailing
-        )
-    }
-
-    var isFinished: Bool {
-        let framesRemaining = self.framesRemaining ?? 0
-        return leadingRemaining <= 0 && trailingRemaining <= 0 && framesRemaining <= 0
-    }
-}
-
-private nonisolated(unsafe) var pendingChunkTrims = [PendingChunkTrim]()
-private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
-
     // MARK: - Stream metadata tracking
     private nonisolated(unsafe) var audioStreamDescription: AudioStreamBasicDescription?
     private nonisolated(unsafe) var packetTableInfo: AudioFilePacketTableInfo?
@@ -278,8 +222,6 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
         missingPacketDescriptionsLogged = false
         packetInfoStatusCache = [:]
         paddingSummaryLogged = false
-        pendingChunkTrims.removeAll()
-        trimMissingTotalWarningLogged = false
         audioFileStream = AudioFileStream(type: type, queue: queue) { [weak self] error in
             self?.onError(error)
         } receiveASBD: { [weak self] asbd in
@@ -360,21 +302,13 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
         restartRequestingMediaData(audioRenderer, from: clampedTime, rate: currentRate)
     }
 
-    func receive(chunk: AudioStreamChunk) {
-        let data = chunk.data
-        if diagEnabled {
-            diagBytesReceivedThisTick += data.count
+    func receive(data: Data) {
+        if diagEnabled { 
+            diagBytesReceivedThisTick += data.count 
+            // Immediate diagnostic for data ingestion
             bufferLog("📊 DIAG INGEST: +\(data.count) bytes (total this tick: \(diagBytesReceivedThisTick))")
         }
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.registerTrimMetadataIfNeeded(from: chunk)
-            self.audioFileStream?.parseData(data)
-        }
-    }
-
-    func receive(data: Data) {
-        receive(chunk: AudioStreamChunk(data: data))
+        audioFileStream?.parseData(data)
     }
 
     func finish() {
@@ -392,8 +326,6 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
         receiveComplete = false
         currentSampleBufferTime = nil
         onSampleBufferChanged(nil)
-        pendingChunkTrims.removeAll()
-        trimMissingTotalWarningLogged = false
         if let audioSynchronizer, let audioRenderer {
             audioRenderer.stopRequestingMediaData()
             audioSynchronizer.removeRenderer(audioRenderer, at: .zero) { [weak self] _ in
@@ -1078,58 +1010,6 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
         logPaddingSummaryIfPossible(reason: "packetTableInfo")
     }
     
-    private func registerTrimMetadataIfNeeded(from chunk: AudioStreamChunk) {
-        guard let trim = chunk.trim else { return }
-
-        let leading = max(trim.leadingFrames, 0)
-        let trailing = max(trim.trailingFrames, 0)
-        guard leading > 0 || trailing > 0 else { return }
-
-        var totalFrames = trim.framesBeforeTrimming
-        if let total = totalFrames, total < leading + trailing {
-            if !trimMissingTotalWarningLogged {
-                bufferLog("⚠️ TRIM metadata totalFrames (\(total)) smaller than leading+trailing (\(leading + trailing)); adjusting to maintain ordering.")
-                trimMissingTotalWarningLogged = true
-            }
-            totalFrames = leading + trailing
-        }
-
-        if totalFrames == nil, !trimMissingTotalWarningLogged {
-            bufferLog("⚠️ TRIM metadata missing totalFrames; trailing padding may not be trimmed precisely.")
-            trimMissingTotalWarningLogged = true
-        }
-
-        if let total = totalFrames,
-           let audible = trim.expectedAudibleFrames,
-           total - (leading + trailing) != audible {
-            bufferLog("⚠️ TRIM metadata mismatch: decoded=\(total), delay=\(leading), padding=\(trailing), expectedAudible=\(audible)")
-        }
-
-        pendingChunkTrims.append(
-            PendingChunkTrim(
-                leadingRemaining: leading,
-                trailingRemaining: trailing,
-                framesRemaining: totalFrames,
-                sampleRate: trim.sampleRateHz
-            )
-        )
-    }
-
-    private func nextTrimInstruction(for sampleCount: Int) -> AudioBuffersQueue.SampleBufferTrimInstruction? {
-        guard !pendingChunkTrims.isEmpty else { return nil }
-
-        var trim = pendingChunkTrims[0]
-        let instruction = trim.instructionForBuffer(sampleCount: sampleCount)
-
-        if trim.isFinished {
-            pendingChunkTrims.removeFirst()
-        } else {
-            pendingChunkTrims[0] = trim
-        }
-
-        return instruction
-    }
-
     private func handleAudioStreamPackets(
         numberOfBytes: UInt32,
         bytes: UnsafeRawPointer,
@@ -1178,11 +1058,7 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
                 numberOfBytes: numberOfBytes,
                 bytes: bytes,
                 numberOfPackets: numberOfPackets,
-                packets: packets,
-                trimProvider: { [weak self] sampleCount in
-                    guard let self else { return nil }
-                    return self.nextTrimInstruction(for: sampleCount)
-                }
+                packets: packets
             )
             
             let newDuration = audioBuffersQueue.duration.seconds
