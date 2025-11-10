@@ -1085,7 +1085,7 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
         let trailing = max(trim.trailingFrames, 0)
         guard leading > 0 || trailing > 0 else { return }
 
-        var totalFrames = trim.totalFrames
+        var totalFrames = trim.framesBeforeTrimming
         if let total = totalFrames, total < leading + trailing {
             if !trimMissingTotalWarningLogged {
                 bufferLog("⚠️ TRIM metadata totalFrames (\(total)) smaller than leading+trailing (\(leading + trailing)); adjusting to maintain ordering.")
@@ -1097,6 +1097,12 @@ private nonisolated(unsafe) var trimMissingTotalWarningLogged = false
         if totalFrames == nil, !trimMissingTotalWarningLogged {
             bufferLog("⚠️ TRIM metadata missing totalFrames; trailing padding may not be trimmed precisely.")
             trimMissingTotalWarningLogged = true
+        }
+
+        if let total = totalFrames,
+           let audible = trim.expectedAudibleFrames,
+           total - (leading + trailing) != audible {
+            bufferLog("⚠️ TRIM metadata mismatch: decoded=\(total), delay=\(leading), padding=\(trailing), expectedAudible=\(audible)")
         }
 
         pendingChunkTrims.append(
