@@ -8,6 +8,11 @@ final class AudioBuffersQueue: Sendable {
     private nonisolated(unsafe) var buffers = [CMSampleBuffer]()
     private let lock = NSLock()
 
+    struct SampleBufferTrimInstruction {
+        let leadingFrames: Int
+        let trailingFrames: Int
+    }
+
     private(set) nonisolated(unsafe) var duration = CMTime.zero
 
     var isEmpty: Bool {
@@ -24,7 +29,8 @@ final class AudioBuffersQueue: Sendable {
         numberOfBytes: UInt32,
         bytes: UnsafeRawPointer,
         numberOfPackets: UInt32,
-        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
+        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?,
+        trimProvider: ((Int) -> SampleBufferTrimInstruction?)? = nil
     ) throws {
         try withLock {
             let queueSizeBefore = buffers.count
@@ -35,6 +41,17 @@ final class AudioBuffersQueue: Sendable {
                 packetCount: numberOfPackets,
                 packetDescriptions: packets
             ) else { return }
+
+            if let trimProvider {
+                let numSamples = CMSampleBufferGetNumSamples(buffer)
+                if let trim = trimProvider(numSamples) {
+                    let totalTrim = trim.leadingFrames + trim.trailingFrames
+                    if totalTrim >= numSamples {
+                        return
+                    }
+                    applyTrim(trim, to: buffer)
+                }
+            }
             
             // Diagnostics: count enqueued seconds
             let seconds = buffer.duration.seconds
@@ -151,6 +168,32 @@ final class AudioBuffersQueue: Sendable {
         guard createStatus == noErr else { throw AudioPlayerError.status(createStatus) }
 
         return sampleBuffer
+    }
+
+    private func applyTrim(_ trim: SampleBufferTrimInstruction, to buffer: CMSampleBuffer) {
+        let sampleRate = audioDescription.mSampleRate
+        guard sampleRate > 0 else { return }
+        let timescale = Int32(sampleRate)
+
+        if trim.leadingFrames > 0 {
+            let time = CMTime(value: CMTimeValue(trim.leadingFrames), timescale: timescale)
+            CMSampleBufferSetAttachment(
+                buffer,
+                key: kCMSampleAttachmentKey_TrimDurationAtStart,
+                value: NSValue(time: time),
+                attachmentMode: .shouldNotPropagate
+            )
+        }
+
+        if trim.trailingFrames > 0 {
+            let time = CMTime(value: CMTimeValue(trim.trailingFrames), timescale: timescale)
+            CMSampleBufferSetAttachment(
+                buffer,
+                key: kCMSampleAttachmentKey_TrimDurationAtEnd,
+                value: NSValue(time: time),
+                attachmentMode: .shouldNotPropagate
+            )
+        }
     }
 
     private func makeBlockBuffer(from data: Data) throws -> CMBlockBuffer? {
