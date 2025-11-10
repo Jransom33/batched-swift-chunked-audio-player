@@ -175,25 +175,18 @@ final class AudioBuffersQueue: Sendable {
         let sampleRate = audioDescription.mSampleRate
         guard sampleRate > 0 else { return }
         let timescale = Int32(sampleRate)
+        let mode: CMAttachmentMode = kCMAttachmentMode_ShouldNotPropagate
 
         if trim.leadingFrames > 0 {
             let time = CMTime(value: CMTimeValue(trim.leadingFrames), timescale: timescale)
-            CMSampleBufferSetAttachment(
-                buffer,
-                key: kCMSampleAttachmentKey_TrimDurationAtStart,
-                value: NSValue(time: time),
-                attachmentMode: CMAttachmentMode.shouldNotPropagate
-            )
+            let key = "TrimDurationAtStart" as CFString
+            CMSetAttachment(buffer, key: key, value: NSValue(time: time), attachmentMode: mode)
         }
 
         if trim.trailingFrames > 0 {
             let time = CMTime(value: CMTimeValue(trim.trailingFrames), timescale: timescale)
-            CMSampleBufferSetAttachment(
-                buffer,
-                key: kCMSampleAttachmentKey_TrimDurationAtEnd,
-                value: NSValue(time: time),
-                attachmentMode: CMAttachmentMode.shouldNotPropagate
-            )
+            let key = "TrimDurationAtEnd" as CFString
+            CMSetAttachment(buffer, key: key, value: NSValue(time: time), attachmentMode: mode)
         }
     }
 
