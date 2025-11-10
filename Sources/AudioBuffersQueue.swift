@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import os
 
 final class AudioBuffersQueue: Sendable {
@@ -181,7 +182,7 @@ final class AudioBuffersQueue: Sendable {
                 buffer,
                 key: kCMSampleAttachmentKey_TrimDurationAtStart,
                 value: NSValue(time: time),
-                attachmentMode: .shouldNotPropagate
+                attachmentMode: CMAttachmentMode.shouldNotPropagate
             )
         }
 
@@ -191,7 +192,7 @@ final class AudioBuffersQueue: Sendable {
                 buffer,
                 key: kCMSampleAttachmentKey_TrimDurationAtEnd,
                 value: NSValue(time: time),
-                attachmentMode: .shouldNotPropagate
+                attachmentMode: CMAttachmentMode.shouldNotPropagate
             )
         }
     }
