@@ -67,6 +67,11 @@ public final class AudioPlayer: ObservableObject, Sendable {
         startReceivingData(from: stream)
     }
 
+    public func markChunkStart(chunkIndex: Int, primingFrameCount: Int = 1024) {
+        guard primingFrameCount > 0 else { return }
+        synchronizer?.beginChunk(chunkIndex: chunkIndex, primingFrames: primingFrameCount)
+    }
+
     public func stop() {
         cancelDataTask()
         cancelSynchronizer()

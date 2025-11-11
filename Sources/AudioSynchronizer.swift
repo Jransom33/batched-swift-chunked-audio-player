@@ -28,6 +28,11 @@ private actor LogThrottler {
 
 private let logThrottler = LogThrottler()
 
+private struct PendingChunkTrim {
+    let chunkIndex: Int
+    var framesRemaining: Int
+}
+
 private func throttledBufferLog(_ message: String, throttleKey: String, throttleInterval: TimeInterval = 1.0) {
     Task {
         if await logThrottler.shouldLog(key: throttleKey, interval: throttleInterval) {
@@ -90,6 +95,8 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var audioRendererErrorCancellable: AnyCancellable?
     private nonisolated(unsafe) var audioRendererRateCancellable: AnyCancellable?
     private nonisolated(unsafe) var audioRendererTimeCancellable: AnyCancellable?
+
+    private nonisolated(unsafe) var pendingChunkTrims: [PendingChunkTrim] = []
 
     nonisolated(unsafe) var desiredRate: Float = 1.0 {
         didSet {
@@ -211,9 +218,20 @@ final class AudioSynchronizer: Sendable {
         self.onBuffering = onBuffering
     }
 
+    func beginChunk(chunkIndex: Int, primingFrames: Int) {
+        let frames = max(primingFrames, 0)
+        guard frames > 0 else { return }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pendingChunkTrims.append(PendingChunkTrim(chunkIndex: chunkIndex, framesRemaining: frames))
+            bufferLog("✂️ [PRIMING_TRIM] Scheduled chunk \(chunkIndex) for priming trim (frames=\(frames))")
+        }
+    }
+
     func prepare(type: AudioFileTypeID? = nil) {
         invalidate()
         receiveComplete = false
+        pendingChunkTrims.removeAll()
         audioStreamDescription = nil
         packetTableInfo = nil
         totalPacketFramesReceived = 0
@@ -324,6 +342,7 @@ final class AudioSynchronizer: Sendable {
         closeFileStream()
         cancelObservation()
         receiveComplete = false
+        pendingChunkTrims.removeAll()
         currentSampleBufferTime = nil
         onSampleBufferChanged(nil)
         if let audioSynchronizer, let audioRenderer {
@@ -1010,6 +1029,116 @@ final class AudioSynchronizer: Sendable {
         logPaddingSummaryIfPossible(reason: "packetTableInfo")
     }
     
+    private func trimPendingPrimingFrames(
+        bytes: UnsafeRawPointer,
+        byteCount: UInt32,
+        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?,
+        packetCount: UInt32
+    ) -> (UnsafeRawPointer, UInt32, UnsafeMutablePointer<AudioStreamPacketDescription>?, UInt32)? {
+        guard !pendingChunkTrims.isEmpty else { return nil }
+        guard let asbd = audioStreamDescription else { return nil }
+
+        var remainingBytes = Int(byteCount)
+        var remainingPackets = Int(packetCount)
+        var totalBytesTrimmed = 0
+        var totalPacketsTrimmed = 0
+        var failedChunkIndex: Int?
+        var trimmedCurrentChunk = false
+
+        while !pendingChunkTrims.isEmpty,
+              pendingChunkTrims[0].framesRemaining > 0,
+              remainingPackets > 0,
+              remainingBytes > 0 {
+
+            var framesInPacket = 0
+            var packetByteSize = 0
+
+            if let pointer = packets {
+                let currentDescPointer = pointer.advanced(by: totalPacketsTrimmed)
+                let packetDesc = currentDescPointer.pointee
+                packetByteSize = Int(packetDesc.mDataByteSize)
+
+                if packetByteSize <= 0 {
+                    failedChunkIndex = pendingChunkTrims[0].chunkIndex
+                    bufferLog("⚠️ [PRIMING_TRIM] Encountered zero-byte packet while trimming chunk \(failedChunkIndex!)")
+                    break
+                }
+
+                if packetDesc.mVariableFramesInPacket > 0 {
+                    framesInPacket = Int(packetDesc.mVariableFramesInPacket)
+                } else if asbd.mFramesPerPacket > 0 {
+                    framesInPacket = Int(asbd.mFramesPerPacket)
+                } else {
+                    failedChunkIndex = pendingChunkTrims[0].chunkIndex
+                    bufferLog("⚠️ [PRIMING_TRIM] Unable to resolve frame count for chunk \(failedChunkIndex!)")
+                    break
+                }
+            } else if asbd.mFramesPerPacket > 0 {
+                framesInPacket = Int(asbd.mFramesPerPacket)
+                if asbd.mBytesPerPacket > 0 {
+                    packetByteSize = Int(asbd.mBytesPerPacket)
+                } else if remainingPackets > 0 {
+                    packetByteSize = remainingBytes / remainingPackets
+                } else {
+                    failedChunkIndex = pendingChunkTrims[0].chunkIndex
+                    bufferLog("⚠️ [PRIMING_TRIM] Packet sizing unavailable for chunk \(failedChunkIndex!)")
+                    break
+                }
+            } else {
+                failedChunkIndex = pendingChunkTrims[0].chunkIndex
+                bufferLog("⚠️ [PRIMING_TRIM] Missing packet description metadata for chunk \(failedChunkIndex!)")
+                break
+            }
+
+            if framesInPacket <= 0 {
+                failedChunkIndex = pendingChunkTrims[0].chunkIndex
+                bufferLog("⚠️ [PRIMING_TRIM] Non-positive frame count while trimming chunk \(failedChunkIndex!)")
+                break
+            }
+
+            pendingChunkTrims[0].framesRemaining -= framesInPacket
+            totalBytesTrimmed += packetByteSize
+            totalPacketsTrimmed += 1
+            remainingPackets -= 1
+            remainingBytes -= packetByteSize
+
+            if pendingChunkTrims[0].framesRemaining <= 0 {
+                bufferLog("✂️✅ [PRIMING_TRIM] Completed trim for chunk \(pendingChunkTrims[0].chunkIndex)")
+                pendingChunkTrims.removeFirst()
+                trimmedCurrentChunk = true
+            } else {
+                bufferLog("✂️ [PRIMING_TRIM] Chunk \(pendingChunkTrims[0].chunkIndex) priming remaining: \(pendingChunkTrims[0].framesRemaining) frames")
+            }
+
+            if trimmedCurrentChunk {
+                break
+            }
+        }
+
+        if let failedIndex = failedChunkIndex {
+            bufferLog("⚠️ [PRIMING_TRIM] Giving up on trim for chunk \(failedIndex); proceeding with audio as-is")
+            if !pendingChunkTrims.isEmpty {
+                pendingChunkTrims.removeFirst()
+            }
+            return nil
+        }
+
+        guard totalBytesTrimmed > 0 else { return nil }
+
+        let adjustedBytesPointer = bytes.advanced(by: totalBytesTrimmed)
+        let adjustedByteCount = UInt32(max(remainingBytes, 0))
+        let adjustedPacketsPointer = packets?.advanced(by: totalPacketsTrimmed)
+        let adjustedPacketCount = UInt32(max(remainingPackets, 0))
+
+        if adjustedByteCount == 0 {
+            bufferLog("✂️ [PRIMING_TRIM] Entire packet batch consumed while trimming encoder delay")
+        } else {
+            bufferLog("✂️ [PRIMING_TRIM] Trimmed \(totalBytesTrimmed) bytes across \(totalPacketsTrimmed) packets")
+        }
+
+        return (adjustedBytesPointer, adjustedByteCount, adjustedPacketsPointer, adjustedPacketCount)
+    }
+
     private func handleAudioStreamPackets(
         numberOfBytes: UInt32,
         bytes: UnsafeRawPointer,
@@ -1017,34 +1146,56 @@ final class AudioSynchronizer: Sendable {
         packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
     ) {
         // bufferLog("🎧 RECEIVED \(numberOfPackets) PACKETS - \(numberOfBytes) bytes")
-        
+
         guard let audioBuffersQueue = self.audioBuffersQueue else {
             bufferLog("❌ PACKETS DROPPED - No AudioBuffersQueue")
             return
         }
-        
+
+        var effectiveBytesPointer = bytes
+        var effectiveByteCount = numberOfBytes
+        var effectivePacketsPointer = packets
+        var effectivePacketCount = numberOfPackets
+
+        if let trimmed = trimPendingPrimingFrames(
+            bytes: effectiveBytesPointer,
+            byteCount: effectiveByteCount,
+            packets: effectivePacketsPointer,
+            packetCount: effectivePacketCount
+        ) {
+            effectiveBytesPointer = trimmed.0
+            effectiveByteCount = trimmed.1
+            effectivePacketsPointer = trimmed.2
+            effectivePacketCount = trimmed.3
+
+            if effectiveByteCount == 0 || effectivePacketCount == 0 {
+                bufferLog("✂️ [PRIMING_TRIM] All data consumed by encoder-delay trim; skipping enqueue")
+                return
+            }
+        }
+
         if let asbd = audioStreamDescription,
            asbd.mFormatID == kAudioFormatMPEGLayer3,
            asbd.mSampleRate > 0 {
             if let framesInBatch = framesFromPackets(
-                numberOfPackets: numberOfPackets,
-                packets: packets,
+                numberOfPackets: effectivePacketCount,
+                packets: effectivePacketsPointer,
                 asbd: asbd
             ) {
                 totalPacketFramesReceived += framesInBatch
                 totalPacketBatches += 1
-                
+
                 if shouldLogPacketBatch(batch: totalPacketBatches) {
                     let batchSeconds = framesToSecondsString(framesInBatch, sampleRate: asbd.mSampleRate)
                     let totalSeconds = framesToSecondsString(totalPacketFramesReceived, sampleRate: asbd.mSampleRate)
                     bufferLog("🧮 FRAME BATCH #\(totalPacketBatches) - +\(framesInBatch) frames (\(batchSeconds)s); cumulative \(totalPacketFramesReceived) frames (\(totalSeconds)s)")
                 }
-                
-                if packets == nil, !missingPacketDescriptionsLogged {
+
+                if effectivePacketsPointer == nil, !missingPacketDescriptionsLogged {
                     missingPacketDescriptionsLogged = true
                     bufferLog("ℹ️ PACKET DESCRIPTIONS ABSENT - Assuming \(asbd.mFramesPerPacket) frames/packet; trailing padding detection may be approximate.")
                 }
-                
+
                 logCumulativeFrameStats(context: "packets_batch \(totalPacketBatches)")
                 logPaddingSummaryIfPossible(reason: "packets_batch")
             } else if !frameComputationFallbackLogged {
@@ -1052,33 +1203,33 @@ final class AudioSynchronizer: Sendable {
                 bufferLog("⚠️ FRAME COUNT UNAVAILABLE - framesPerPacket=0 and no packet descriptions; cannot evaluate MP3 padding.")
             }
         }
-        
+
         do {
             try audioBuffersQueue.enqueue(
-                numberOfBytes: numberOfBytes,
-                bytes: bytes,
-                numberOfPackets: numberOfPackets,
-                packets: packets
+                numberOfBytes: effectiveByteCount,
+                bytes: effectiveBytesPointer,
+                numberOfPackets: effectivePacketCount,
+                packets: effectivePacketsPointer
             )
-            
+
             let newDuration = audioBuffersQueue.duration.seconds
             let currentPlayerTime = audioSynchronizer?.currentTime().seconds ?? 0.0
             let newBufferAhead = newDuration - currentPlayerTime
             // bufferLog("✅ ENQUEUED PACKETS - Queue duration: \(String(format: "%.2f", newDuration))s, isEmpty: \(audioBuffersQueue.isEmpty)")
             // bufferLog("📊 PKG_ENQUEUE - Queue: \(String(format: "%.2f", newDuration))s total | Ahead: \(String(format: "%.2f", newBufferAhead))s | Player: \(String(format: "%.2f", currentPlayerTime))s")
             onDurationChanged(audioBuffersQueue.duration)
-            
-            // Force exit buffering if we have new data
+
             if isBuffering {
                 bufferLog("🚑 NEW BUFFER ARRIVED DURING BUFFERING - Attempting force exit")
                 forceExitBufferingIfPossible()
             }
-            
+
         } catch {
             bufferLog("❌ FAILED TO ENQUEUE PACKETS - Error: \(error)")
             onError(AudioPlayerError.other(error))
         }
     }
+
 
     // MARK: - Padding diagnostics helpers
 
