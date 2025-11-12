@@ -28,9 +28,12 @@ private actor LogThrottler {
 
 private let logThrottler = LogThrottler()
 
-private struct PendingChunkTrim {
+private struct ChunkBudget {
     let chunkIndex: Int
-    var framesRemaining: Int
+    var leadingFramesRemaining: Int
+    var playableFramesRemaining: Int?
+    let totalPlayableFrames: Int?
+    let trailingPaddingFrames: Int
 }
 
 private func throttledBufferLog(_ message: String, throttleKey: String, throttleInterval: TimeInterval = 1.0) {
@@ -96,7 +99,7 @@ final class AudioSynchronizer: Sendable {
     private nonisolated(unsafe) var audioRendererRateCancellable: AnyCancellable?
     private nonisolated(unsafe) var audioRendererTimeCancellable: AnyCancellable?
 
-    private nonisolated(unsafe) var pendingChunkTrims: [PendingChunkTrim] = []
+    private nonisolated(unsafe) var chunkBudgets: [ChunkBudget] = []
 
     nonisolated(unsafe) var desiredRate: Float = 1.0 {
         didSet {
@@ -218,20 +221,33 @@ final class AudioSynchronizer: Sendable {
         self.onBuffering = onBuffering
     }
 
-    func beginChunk(chunkIndex: Int, primingFrames: Int) {
-        let frames = max(primingFrames, 0)
-        guard frames > 0 else { return }
+    func beginChunk(
+        chunkIndex: Int,
+        primingFrames: Int,
+        playableFrames: Int?,
+        trailingPaddingFrames: Int
+    ) {
+        let leading = max(primingFrames, 0)
+        let playable = playableFrames.flatMap { $0 >= 0 ? $0 : nil }
         queue.async { [weak self] in
             guard let self else { return }
-            self.pendingChunkTrims.append(PendingChunkTrim(chunkIndex: chunkIndex, framesRemaining: frames))
-            bufferLog("✂️ [PRIMING_TRIM] Scheduled chunk \(chunkIndex) for priming trim (frames=\(frames))")
+            self.chunkBudgets.append(
+                ChunkBudget(
+                    chunkIndex: chunkIndex,
+                    leadingFramesRemaining: leading,
+                    playableFramesRemaining: playable,
+                    totalPlayableFrames: playable,
+                    trailingPaddingFrames: max(trailingPaddingFrames, 0)
+                )
+            )
+            bufferLog("✂️ [CHUNK_TRIM] Scheduled chunk \(chunkIndex) - leading=\(leading) frames, playable=\(playable ?? -1) frames, trailing=\(trailingPaddingFrames) frames")
         }
     }
 
     func prepare(type: AudioFileTypeID? = nil) {
         invalidate()
         receiveComplete = false
-        pendingChunkTrims.removeAll()
+        chunkBudgets.removeAll()
         audioStreamDescription = nil
         packetTableInfo = nil
         totalPacketFramesReceived = 0
@@ -342,7 +358,7 @@ final class AudioSynchronizer: Sendable {
         closeFileStream()
         cancelObservation()
         receiveComplete = false
-        pendingChunkTrims.removeAll()
+        chunkBudgets.removeAll()
         currentSampleBufferTime = nil
         onSampleBufferChanged(nil)
         if let audioSynchronizer, let audioRenderer {
@@ -1029,127 +1045,232 @@ final class AudioSynchronizer: Sendable {
         logPaddingSummaryIfPossible(reason: "packetTableInfo")
     }
     
-    private func trimPendingPrimingFrames(
+    private struct TrimmedPacketBatch {
+        let bytesPointer: UnsafeRawPointer
+        let byteCount: UInt32
+        let packetsPointer: UnsafeMutablePointer<AudioStreamPacketDescription>?
+        let packetCount: UInt32
+        let trimFramesAtEnd: Int
+    }
+
+    private func applyChunkBudgets(
         bytes: UnsafeRawPointer,
         byteCount: UInt32,
         packets: UnsafeMutablePointer<AudioStreamPacketDescription>?,
         packetCount: UInt32
-    ) -> (UnsafeRawPointer, UInt32, UnsafeMutablePointer<AudioStreamPacketDescription>?, UInt32)? {
-        guard !pendingChunkTrims.isEmpty else { return nil }
+    ) -> TrimmedPacketBatch? {
+        guard !chunkBudgets.isEmpty else { return nil }
         guard let asbd = audioStreamDescription else { return nil }
 
-        var remainingBytes = Int(byteCount)
-        var remainingPackets = Int(packetCount)
-        var totalBytesTrimmed = 0
-        var totalPacketsTrimmed = 0
-        var failedChunkIndex: Int?
-        var trimmedCurrentChunk = false
+        var budget = chunkBudgets[0]
+        var effectiveBytesPointer = bytes
+        var effectiveByteCount = byteCount
+        var effectivePacketsPointer = packets
+        var effectivePacketCount = packetCount
 
-        while !pendingChunkTrims.isEmpty,
-              pendingChunkTrims[0].framesRemaining > 0,
-              remainingPackets > 0,
-              remainingBytes > 0 {
+        var leadingBytesTrimmed = 0
+        var leadingPacketsTrimmed = 0
 
-            var framesInPacket = 0
-            var packetByteSize = 0
-
+        func framesAndSize(forPacketAt offset: Int) -> (frames: Int, byteSize: Int)? {
             if let pointer = packets {
-                let currentDescPointer = pointer.advanced(by: totalPacketsTrimmed)
-                let packetDesc = currentDescPointer.pointee
-                packetByteSize = Int(packetDesc.mDataByteSize)
-
-                if packetByteSize <= 0 {
-                    failedChunkIndex = pendingChunkTrims[0].chunkIndex
-                    bufferLog("⚠️ [PRIMING_TRIM] Encountered zero-byte packet while trimming chunk \(failedChunkIndex!)")
-                    break
-                }
-
+                let packetDesc = pointer.advanced(by: offset).pointee
+                let size = Int(packetDesc.mDataByteSize)
+                let frames: Int
                 if packetDesc.mVariableFramesInPacket > 0 {
-                    framesInPacket = Int(packetDesc.mVariableFramesInPacket)
+                    frames = Int(packetDesc.mVariableFramesInPacket)
                 } else if asbd.mFramesPerPacket > 0 {
-                    framesInPacket = Int(asbd.mFramesPerPacket)
+                    frames = Int(asbd.mFramesPerPacket)
                 } else {
-                    failedChunkIndex = pendingChunkTrims[0].chunkIndex
-                    bufferLog("⚠️ [PRIMING_TRIM] Unable to resolve frame count for chunk \(failedChunkIndex!)")
-                    break
+                    return nil
                 }
-            } else if asbd.mFramesPerPacket > 0 {
-                framesInPacket = Int(asbd.mFramesPerPacket)
+                guard size > 0 && frames > 0 else { return nil }
+                return (frames, size)
+            } else {
+                guard asbd.mFramesPerPacket > 0 else { return nil }
+                let frames = Int(asbd.mFramesPerPacket)
+                let size: Int
                 if asbd.mBytesPerPacket > 0 {
-                    packetByteSize = Int(asbd.mBytesPerPacket)
-                } else if remainingPackets > 0 {
-                    packetByteSize = remainingBytes / remainingPackets
+                    size = Int(asbd.mBytesPerPacket)
+                } else if packetCount > 0 {
+                    size = Int(byteCount) / Int(packetCount)
                 } else {
-                    failedChunkIndex = pendingChunkTrims[0].chunkIndex
-                    bufferLog("⚠️ [PRIMING_TRIM] Packet sizing unavailable for chunk \(failedChunkIndex!)")
+                    return nil
+                }
+                guard size > 0 else { return nil }
+                return (frames, size)
+            }
+        }
+
+        while budget.leadingFramesRemaining > 0,
+              effectivePacketCount > 0 {
+            guard let packetInfo = framesAndSize(forPacketAt: leadingPacketsTrimmed) else {
+                bufferLog("⚠️ [CHUNK_TRIM] Unable to resolve packet info while trimming leading frames for chunk \(budget.chunkIndex)")
+                break
+            }
+
+            if budget.leadingFramesRemaining >= packetInfo.frames {
+                budget.leadingFramesRemaining -= packetInfo.frames
+                leadingBytesTrimmed += packetInfo.byteSize
+                leadingPacketsTrimmed += 1
+                effectivePacketCount -= 1
+                effectiveByteCount = UInt32(max(Int(effectiveByteCount) - packetInfo.byteSize, 0))
+            } else {
+                // Partial packet priming trim not supported for AAC; fall back to attachments
+                bufferLog("⚠️ [CHUNK_TRIM] Partial leading trim required for chunk \(budget.chunkIndex). Using attachment fallback.")
+                break
+            }
+        }
+
+        if leadingBytesTrimmed > 0 {
+            effectiveBytesPointer = bytes.advanced(by: leadingBytesTrimmed)
+            if let pointer = packets {
+                effectivePacketsPointer = pointer.advanced(by: leadingPacketsTrimmed)
+            }
+            if let packetPointer = effectivePacketsPointer {
+                var pointer = packetPointer
+                let trimAmount = Int64(leadingBytesTrimmed)
+                for _ in 0..<Int(effectivePacketCount) {
+                    let currentOffset = pointer.pointee.mStartOffset
+                    pointer.pointee.mStartOffset = max(0, currentOffset - trimAmount)
+                    pointer = pointer.advanced(by: 1)
+                }
+            }
+            bufferLog("✂️ [CHUNK_TRIM] Trimmed \(leadingBytesTrimmed) leading bytes across \(leadingPacketsTrimmed) packets for chunk \(budget.chunkIndex) (remaining leading frames: \(budget.leadingFramesRemaining))")
+        }
+
+        guard effectivePacketCount > 0, effectiveByteCount > 0 else {
+            chunkBudgets[0] = budget
+            if budget.leadingFramesRemaining <= 0 && (budget.playableFramesRemaining ?? 0) == 0 {
+                chunkBudgets.removeFirst()
+                bufferLog("✅ [CHUNK_TRIM] Chunk \(budget.chunkIndex) fully trimmed (no payload in this batch)")
+            }
+            return TrimmedPacketBatch(
+                bytesPointer: effectiveBytesPointer,
+                byteCount: effectiveByteCount,
+                packetsPointer: effectivePacketsPointer,
+                packetCount: effectivePacketCount,
+                trimFramesAtEnd: 0
+            )
+        }
+
+        var trimFramesAtEnd = 0
+        if var playableRemaining = budget.playableFramesRemaining {
+            var packetInfos: [(frames: Int, byteSize: Int)] = []
+            packetInfos.reserveCapacity(Int(effectivePacketCount))
+            for index in 0..<Int(effectivePacketCount) {
+                let info: (frames: Int, byteSize: Int)?
+                if let pointer = effectivePacketsPointer {
+                    let packetDesc = pointer.advanced(by: index).pointee
+                    let size = Int(packetDesc.mDataByteSize)
+                    let frames: Int
+                    if packetDesc.mVariableFramesInPacket > 0 {
+                        frames = Int(packetDesc.mVariableFramesInPacket)
+                    } else if asbd.mFramesPerPacket > 0 {
+                        frames = Int(asbd.mFramesPerPacket)
+                    } else {
+                        info = nil
+                        packetInfos = []
+                        break
+                    }
+                    guard size > 0, frames > 0 else {
+                        info = nil
+                        packetInfos = []
+                        break
+                    }
+                    info = (frames, size)
+                } else {
+                    guard asbd.mFramesPerPacket > 0 else {
+                        info = nil
+                        packetInfos = []
+                        break
+                    }
+                    let frames = Int(asbd.mFramesPerPacket)
+                    let size: Int
+                    if asbd.mBytesPerPacket > 0 {
+                        size = Int(asbd.mBytesPerPacket)
+                    } else if effectivePacketCount > 0 {
+                        size = Int(effectiveByteCount) / Int(effectivePacketCount)
+                    } else {
+                        info = nil
+                        packetInfos = []
+                        break
+                    }
+                    guard size > 0 else {
+                        info = nil
+                        packetInfos = []
+                        break
+                    }
+                    info = (frames, size)
+                }
+
+                if let packet = info {
+                    packetInfos.append(packet)
+                } else {
+                    bufferLog("⚠️ [CHUNK_TRIM] Unable to resolve packet info for chunk \(budget.chunkIndex); skipping playable trimming this batch")
+                    packetInfos.removeAll()
                     break
                 }
+            }
+
+            var keepCount = packetInfos.count
+            if !packetInfos.isEmpty {
+                keepCount = 0
+                for packet in packetInfos {
+                    if playableRemaining > packet.frames {
+                        playableRemaining -= packet.frames
+                        keepCount += 1
+                        continue
+                    } else if playableRemaining == packet.frames {
+                        playableRemaining = 0
+                        keepCount += 1
+                        let trailingPacketsToDrop = packetInfos.count - keepCount
+                        if trailingPacketsToDrop > 0 {
+                            let bytesToDrop = packetInfos.suffix(trailingPacketsToDrop).reduce(0) { $0 + $1.byteSize }
+                            effectivePacketCount = UInt32(max(Int(effectivePacketCount) - trailingPacketsToDrop, 0))
+                            effectiveByteCount = UInt32(max(Int(effectiveByteCount) - bytesToDrop, 0))
+                        }
+                        break
+                    } else {
+                        let excess = packet.frames - playableRemaining
+                        trimFramesAtEnd = min(excess, budget.trailingPaddingFrames)
+                        if excess > budget.trailingPaddingFrames {
+                            bufferLog("⚠️ [CHUNK_TRIM] Excess frames (\(excess)) exceeded trailing padding (\(budget.trailingPaddingFrames)) for chunk \(budget.chunkIndex); clamping trim.")
+                        }
+                        playableRemaining = 0
+                        keepCount += 1
+                        let trailingPacketsToDrop = packetInfos.count - keepCount
+                        if trailingPacketsToDrop > 0 {
+                            let bytesToDrop = packetInfos.suffix(trailingPacketsToDrop).reduce(0) { $0 + $1.byteSize }
+                            effectivePacketCount = UInt32(max(Int(effectivePacketCount) - trailingPacketsToDrop, 0))
+                            effectiveByteCount = UInt32(max(Int(effectiveByteCount) - bytesToDrop, 0))
+                        }
+                        break
+                    }
+                }
+            }
+
+            if packetInfos.isEmpty {
+                chunkBudgets[0] = budget
             } else {
-                failedChunkIndex = pendingChunkTrims[0].chunkIndex
-                bufferLog("⚠️ [PRIMING_TRIM] Missing packet description metadata for chunk \(failedChunkIndex!)")
-                break
+                budget.playableFramesRemaining = max(playableRemaining, 0)
+                if playableRemaining == 0 {
+                    bufferLog("✅ [CHUNK_TRIM] Chunk \(budget.chunkIndex) payload complete (frames consumed ~\(budget.totalPlayableFrames ?? -1))")
+                    chunkBudgets.removeFirst()
+                } else {
+                    chunkBudgets[0] = budget
+                }
             }
-
-            if framesInPacket <= 0 {
-                failedChunkIndex = pendingChunkTrims[0].chunkIndex
-                bufferLog("⚠️ [PRIMING_TRIM] Non-positive frame count while trimming chunk \(failedChunkIndex!)")
-                break
-            }
-
-            pendingChunkTrims[0].framesRemaining -= framesInPacket
-            totalBytesTrimmed += packetByteSize
-            totalPacketsTrimmed += 1
-            remainingPackets -= 1
-            remainingBytes -= packetByteSize
-
-            if pendingChunkTrims[0].framesRemaining <= 0 {
-                bufferLog("✂️✅ [PRIMING_TRIM] Completed trim for chunk \(pendingChunkTrims[0].chunkIndex)")
-                pendingChunkTrims.removeFirst()
-                trimmedCurrentChunk = true
-            } else {
-                bufferLog("✂️ [PRIMING_TRIM] Chunk \(pendingChunkTrims[0].chunkIndex) priming remaining: \(pendingChunkTrims[0].framesRemaining) frames")
-            }
-
-            if trimmedCurrentChunk {
-                break
-            }
-        }
-
-        if let failedIndex = failedChunkIndex {
-            bufferLog("⚠️ [PRIMING_TRIM] Giving up on trim for chunk \(failedIndex); proceeding with audio as-is")
-            if !pendingChunkTrims.isEmpty {
-                pendingChunkTrims.removeFirst()
-            }
-            return nil
-        }
-
-        guard totalBytesTrimmed > 0 else { return nil }
-
-        let adjustedBytesPointer = bytes.advanced(by: totalBytesTrimmed)
-        let adjustedByteCount = UInt32(max(remainingBytes, 0))
-        let adjustedPacketsPointer = packets?.advanced(by: totalPacketsTrimmed)
-        let adjustedPacketCount = UInt32(max(remainingPackets, 0))
-
-        if let adjustedPacketsPointer,
-           adjustedPacketCount > 0,
-           totalBytesTrimmed > 0 {
-            var pointer = adjustedPacketsPointer
-            let trimAmount = Int64(totalBytesTrimmed)
-            for _ in 0..<Int(adjustedPacketCount) {
-                let currentOffset = pointer.pointee.mStartOffset
-                let newOffset = max(0, currentOffset - trimAmount)
-                pointer.pointee.mStartOffset = newOffset
-                pointer = pointer.advanced(by: 1)
-            }
-        }
-
-        if adjustedByteCount == 0 {
-            bufferLog("✂️ [PRIMING_TRIM] Entire packet batch consumed while trimming encoder delay")
         } else {
-            bufferLog("✂️ [PRIMING_TRIM] Trimmed \(totalBytesTrimmed) bytes across \(totalPacketsTrimmed) packets")
+            chunkBudgets[0] = budget
         }
 
-        return (adjustedBytesPointer, adjustedByteCount, adjustedPacketsPointer, adjustedPacketCount)
+        return TrimmedPacketBatch(
+            bytesPointer: effectiveBytesPointer,
+            byteCount: effectiveByteCount,
+            packetsPointer: effectivePacketsPointer,
+            packetCount: effectivePacketCount,
+            trimFramesAtEnd: trimFramesAtEnd
+        )
     }
 
     private func handleAudioStreamPackets(
@@ -1170,19 +1291,21 @@ final class AudioSynchronizer: Sendable {
         var effectivePacketsPointer = packets
         var effectivePacketCount = numberOfPackets
 
-        if let trimmed = trimPendingPrimingFrames(
+        var trimFramesAtEnd = 0
+        if let trimmed = applyChunkBudgets(
             bytes: effectiveBytesPointer,
             byteCount: effectiveByteCount,
             packets: effectivePacketsPointer,
             packetCount: effectivePacketCount
         ) {
-            effectiveBytesPointer = trimmed.0
-            effectiveByteCount = trimmed.1
-            effectivePacketsPointer = trimmed.2
-            effectivePacketCount = trimmed.3
+            effectiveBytesPointer = trimmed.bytesPointer
+            effectiveByteCount = trimmed.byteCount
+            effectivePacketsPointer = trimmed.packetsPointer
+            effectivePacketCount = trimmed.packetCount
+            trimFramesAtEnd = trimmed.trimFramesAtEnd
 
             if effectiveByteCount == 0 || effectivePacketCount == 0 {
-                bufferLog("✂️ [PRIMING_TRIM] All data consumed by encoder-delay trim; skipping enqueue")
+                bufferLog("✂️ [CHUNK_TRIM] Packet batch fully consumed by trim budgets; skipping enqueue")
                 return
             }
         }
@@ -1218,12 +1341,19 @@ final class AudioSynchronizer: Sendable {
         }
 
         do {
-            try audioBuffersQueue.enqueue(
+                    try audioBuffersQueue.enqueue(
                 numberOfBytes: effectiveByteCount,
                 bytes: effectiveBytesPointer,
                 numberOfPackets: effectivePacketCount,
-                packets: effectivePacketsPointer
+                        packets: effectivePacketsPointer,
+                        trimFramesAtEnd: trimFramesAtEnd > 0 ? trimFramesAtEnd : nil
             )
+                    if trimFramesAtEnd > 0,
+                       let sampleRate = audioStreamDescription?.mSampleRate,
+                       sampleRate > 0 {
+                        let seconds = Double(trimFramesAtEnd) / sampleRate
+                        bufferLog("✂️ [CHUNK_TRIM] Requested trailing trim of \(trimFramesAtEnd) frames (\(String(format: "%.6f", seconds))s)")
+                    }
 
             let newDuration = audioBuffersQueue.duration.seconds
             let currentPlayerTime = audioSynchronizer?.currentTime().seconds ?? 0.0

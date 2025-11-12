@@ -24,7 +24,8 @@ final class AudioBuffersQueue: Sendable {
         numberOfBytes: UInt32,
         bytes: UnsafeRawPointer,
         numberOfPackets: UInt32,
-        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?
+        packets: UnsafeMutablePointer<AudioStreamPacketDescription>?,
+        trimFramesAtEnd: Int? = nil
     ) throws {
         try withLock {
             let queueSizeBefore = buffers.count
@@ -35,6 +36,22 @@ final class AudioBuffersQueue: Sendable {
                 packetCount: numberOfPackets,
                 packetDescriptions: packets
             ) else { return }
+            
+            if let trimFramesAtEnd,
+               trimFramesAtEnd > 0,
+               audioDescription.mSampleRate > 0 {
+                let trimTime = CMTime(
+                    value: CMTimeValue(trimFramesAtEnd),
+                    timescale: Int32(audioDescription.mSampleRate)
+                )
+                let trimValue = NSValue(time: trimTime)
+                CMSetAttachment(
+                    buffer,
+                    key: kCMSampleBufferAttachmentKey_TrimDurationAtEnd,
+                    value: trimValue,
+                    attachmentMode: .shouldPropagate
+                )
+            }
             
             // Diagnostics: count enqueued seconds
             let seconds = buffer.duration.seconds
