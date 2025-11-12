@@ -1130,6 +1130,19 @@ final class AudioSynchronizer: Sendable {
         let adjustedPacketsPointer = packets?.advanced(by: totalPacketsTrimmed)
         let adjustedPacketCount = UInt32(max(remainingPackets, 0))
 
+        if let adjustedPacketsPointer,
+           adjustedPacketCount > 0,
+           totalBytesTrimmed > 0 {
+            var pointer = adjustedPacketsPointer
+            let trimAmount = Int64(totalBytesTrimmed)
+            for _ in 0..<Int(adjustedPacketCount) {
+                let currentOffset = pointer.pointee.mStartOffset
+                let newOffset = max(0, currentOffset - trimAmount)
+                pointer.pointee.mStartOffset = newOffset
+                pointer = pointer.advanced(by: 1)
+            }
+        }
+
         if adjustedByteCount == 0 {
             bufferLog("✂️ [PRIMING_TRIM] Entire packet batch consumed while trimming encoder delay")
         } else {
