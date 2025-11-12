@@ -49,7 +49,7 @@ final class AudioBuffersQueue: Sendable {
                     buffer,
                     key: kCMSampleBufferAttachmentKey_TrimDurationAtEnd,
                     value: trimValue,
-                    attachmentMode: .shouldPropagate
+                    attachmentMode: kCMAttachmentMode_ShouldPropagate
                 )
             }
             
