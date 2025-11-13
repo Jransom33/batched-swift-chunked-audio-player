@@ -15,11 +15,13 @@ final class AudioFileStream: Sendable {
         _ sourceProperty: AudioFilePropertyID,
         _ status: OSStatus
     ) -> Void
+    typealias MagicCookieCallback = @Sendable (_ magicCookie: Data?) -> Void
 
     private let receiveError: ErrorCallback
     private let receiveASBD: ASBDCallback
     private let receivePackets: PacketsCallback
     private let receivePacketTableInfo: PacketTableInfoCallback
+    private let receiveMagicCookie: MagicCookieCallback
 
     private let syncQueue: DispatchQueue
 
@@ -33,7 +35,8 @@ final class AudioFileStream: Sendable {
         receiveError: @escaping ErrorCallback,
         receiveASBD: @escaping ASBDCallback,
         receivePackets: @escaping PacketsCallback,
-        receivePacketTableInfo: @escaping PacketTableInfoCallback = { _, _, _ in }
+        receivePacketTableInfo: @escaping PacketTableInfoCallback = { _, _, _ in },
+        receiveMagicCookie: @escaping MagicCookieCallback = { _ in }
     ) {
         self.fileTypeID = type
         self.syncQueue = queue
@@ -41,6 +44,7 @@ final class AudioFileStream: Sendable {
         self.receiveASBD = receiveASBD
         self.receivePackets = receivePackets
         self.receivePacketTableInfo = receivePacketTableInfo
+        self.receiveMagicCookie = receiveMagicCookie
     }
 
     func open() {
@@ -98,8 +102,10 @@ final class AudioFileStream: Sendable {
             let getPropertyStatus = AudioFileStreamGetProperty(audioStreamID, propertyID, &asbdSize, &asbd)
             guard getPropertyStatus == noErr else { return receiveError(.status(getPropertyStatus)) }
             receiveASBD(asbd)
-        case kAudioFileStreamProperty_ReadyToProducePackets,
-             kAudioFileStreamProperty_PacketTableInfo:
+        case kAudioFileStreamProperty_ReadyToProducePackets:
+            emitMagicCookie(audioStreamID: audioStreamID)
+            fallthrough
+        case kAudioFileStreamProperty_PacketTableInfo:
             emitPacketTableInfo(sourceProperty: propertyID, audioStreamID: audioStreamID)
         default:
             break
@@ -146,5 +152,39 @@ final class AudioFileStream: Sendable {
         }
 
         receivePacketTableInfo(packetInfo, sourceProperty, propertyStatus)
+    }
+
+    private func emitMagicCookie(audioStreamID: AudioFileStreamID) {
+        var cookieSize: UInt32 = 0
+        let infoStatus = AudioFileStreamGetPropertyInfo(
+            audioStreamID,
+            kAudioFileStreamProperty_MagicCookieData,
+            &cookieSize,
+            nil
+        )
+
+        guard infoStatus == noErr, cookieSize > 0 else {
+            receiveMagicCookie(nil)
+            return
+        }
+
+        var cookieData = Data(count: Int(cookieSize))
+        let fetchStatus = cookieData.withUnsafeMutableBytes { pointer -> OSStatus in
+            guard let baseAddress = pointer.baseAddress else { return kAudio_ParamError }
+            var size = cookieSize
+            return AudioFileStreamGetProperty(
+                audioStreamID,
+                kAudioFileStreamProperty_MagicCookieData,
+                &size,
+                baseAddress
+            )
+        }
+
+        guard fetchStatus == noErr else {
+            receiveMagicCookie(nil)
+            return
+        }
+
+        receiveMagicCookie(cookieData)
     }
 }

@@ -144,6 +144,7 @@ final class AudioSynchronizer: Sendable {
 
     // MARK: - Stream metadata tracking
     private nonisolated(unsafe) var audioStreamDescription: AudioStreamBasicDescription?
+    private nonisolated(unsafe) var audioMagicCookie: Data?
     private nonisolated(unsafe) var packetTableInfo: AudioFilePacketTableInfo?
     private nonisolated(unsafe) var totalPacketFramesReceived: Int64 = 0
     private nonisolated(unsafe) var totalPacketBatches: Int64 = 0
@@ -249,6 +250,7 @@ final class AudioSynchronizer: Sendable {
         receiveComplete = false
         chunkBudgets.removeAll()
         audioStreamDescription = nil
+        audioMagicCookie = nil
         packetTableInfo = nil
         totalPacketFramesReceived = 0
         totalPacketBatches = 0
@@ -256,7 +258,10 @@ final class AudioSynchronizer: Sendable {
         missingPacketDescriptionsLogged = false
         packetInfoStatusCache = [:]
         paddingSummaryLogged = false
-        audioFileStream = AudioFileStream(type: type, queue: queue) { [weak self] error in
+        audioFileStream = AudioFileStream(
+            type: type,
+            queue: queue
+        ) { [weak self] error in
             self?.onError(error)
         } receiveASBD: { [weak self] asbd in
             self?.handleAudioStreamDescription(asbd: asbd)
@@ -269,6 +274,8 @@ final class AudioSynchronizer: Sendable {
             )
         } receivePacketTableInfo: { [weak self] info, propertyID, status in
             self?.handlePacketTableInfo(info, propertyID: propertyID, status: status)
+        } receiveMagicCookie: { [weak self] cookie in
+            self?.handleMagicCookie(cookie)
         }
         audioFileStream?.open()
         bufferLog("🎵 AUDIO STREAM PREPARED - Ready to receive audio data")
@@ -360,6 +367,7 @@ final class AudioSynchronizer: Sendable {
         receiveComplete = false
         chunkBudgets.removeAll()
         currentSampleBufferTime = nil
+        audioMagicCookie = nil
         onSampleBufferChanged(nil)
         if let audioSynchronizer, let audioRenderer {
             audioRenderer.stopRequestingMediaData()
@@ -1005,7 +1013,10 @@ final class AudioSynchronizer: Sendable {
         audioRenderer = renderer
         audioSynchronizer = synchronizer
         do {
-            audioBuffersQueue = try AudioBuffersQueue(audioDescription: asbd)
+            audioBuffersQueue = try AudioBuffersQueue(
+                audioDescription: asbd,
+                magicCookie: audioMagicCookie
+            )
         } catch {
             bufferLog("❌ FAILED TO CREATE AudioBuffersQueue - Error: \(error)")
             onError(AudioPlayerError.other(error))
@@ -1043,6 +1054,43 @@ final class AudioSynchronizer: Sendable {
         logPacketTableInfo(info, sourceProperty: propertyID)
         logCumulativeFrameStats(context: "packetTableInfo")
         logPaddingSummaryIfPossible(reason: "packetTableInfo")
+    }
+
+    private func handleMagicCookie(_ cookie: Data?) {
+        let normalizedCookie: Data?
+        if let cookie, !cookie.isEmpty {
+            normalizedCookie = cookie
+        } else {
+            normalizedCookie = nil
+        }
+
+        if audioMagicCookie == normalizedCookie {
+            return
+        }
+
+        audioMagicCookie = normalizedCookie
+
+        if let normalizedCookie {
+            bufferLog("🍪 MAGIC COOKIE RECEIVED - \(normalizedCookie.count) bytes")
+        } else {
+            bufferLog("ℹ️ MAGIC COOKIE NOT PROVIDED")
+        }
+
+        guard let queue = audioBuffersQueue,
+              let asbd = audioStreamDescription else { return }
+
+        do {
+            try queue.updateFormatDescription(
+                audioDescription: asbd,
+                magicCookie: normalizedCookie
+            )
+            if let normalizedCookie {
+                bufferLog("🍪 MAGIC COOKIE APPLIED - Updated format description with \(normalizedCookie.count) bytes")
+            }
+        } catch {
+            bufferLog("❌ FAILED TO APPLY MAGIC COOKIE - Error: \(error)")
+            onError(AudioPlayerError.other(error))
+        }
     }
     
     private struct TrimmedPacketBatch {

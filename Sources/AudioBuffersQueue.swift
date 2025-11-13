@@ -2,8 +2,9 @@ import AVFoundation
 import os
 
 final class AudioBuffersQueue: Sendable {
-    private let audioDescription: AudioStreamBasicDescription
-    private let cachedFormatDescription: CMFormatDescription
+    private var audioDescription: AudioStreamBasicDescription
+    private var formatDescription: CMFormatDescription
+    private var magicCookie: Data?
     private nonisolated(unsafe) var allBuffers = [CMSampleBuffer]()
     private nonisolated(unsafe) var buffers = [CMSampleBuffer]()
     private let lock = NSLock()
@@ -14,9 +15,13 @@ final class AudioBuffersQueue: Sendable {
         withLock { buffers.isEmpty }
     }
 
-    init(audioDescription: AudioStreamBasicDescription) throws {
+    init(audioDescription: AudioStreamBasicDescription, magicCookie: Data?) throws {
         self.audioDescription = audioDescription
-        self.cachedFormatDescription = try CMFormatDescription(audioStreamBasicDescription: audioDescription)
+        self.magicCookie = magicCookie
+        self.formatDescription = try AudioBuffersQueue.makeFormatDescription(
+            audioDescription: audioDescription,
+            magicCookie: magicCookie
+        )
         self.duration = CMTime(value: 0, timescale: Int32(audioDescription.mSampleRate))
     }
 
@@ -146,6 +151,26 @@ final class AudioBuffersQueue: Sendable {
         }
     }
 
+    func updateFormatDescription(
+        audioDescription: AudioStreamBasicDescription,
+        magicCookie: Data?
+    ) throws {
+        try withLock {
+            self.audioDescription = audioDescription
+            self.magicCookie = magicCookie
+            self.formatDescription = try AudioBuffersQueue.makeFormatDescription(
+                audioDescription: audioDescription,
+                magicCookie: magicCookie
+            )
+
+            if !buffers.isEmpty || !allBuffers.isEmpty {
+                buffers.removeAll()
+                allBuffers.removeAll()
+                duration = .zero
+            }
+        }
+    }
+
     // MARK: - Private
 
     private func makeSampleBuffer(
@@ -154,7 +179,6 @@ final class AudioBuffersQueue: Sendable {
         packetDescriptions: UnsafePointer<AudioStreamPacketDescription>?
     ) throws -> CMSampleBuffer? {
         guard let blockBuffer = try makeBlockBuffer(from: data) else { return nil }
-        let formatDescription = cachedFormatDescription
         var sampleBuffer: CMSampleBuffer?
         let createStatus = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
             allocator: kCFAllocatorDefault,
@@ -235,6 +259,52 @@ final class AudioBuffersQueue: Sendable {
             print("🔧 [DURATION_HOLD] Duration held at \(String(format: "%.3f", oldDuration))s (no remaining buffers, renderer still has content)")
         }
         // When buffers.isEmpty, keep duration unchanged - the renderer still has the content
+    }
+
+    private static func makeFormatDescription(
+        audioDescription: AudioStreamBasicDescription,
+        magicCookie: Data?
+    ) throws -> CMFormatDescription {
+        var localASBD = audioDescription
+        var formatDescription: CMFormatDescription?
+
+        let status: OSStatus
+        if let magicCookie, !magicCookie.isEmpty {
+            status = magicCookie.withUnsafeBytes { pointer -> OSStatus in
+                let cookiePointer = pointer.bindMemory(to: UInt8.self).baseAddress
+                return CMAudioFormatDescriptionCreate(
+                    allocator: kCFAllocatorDefault,
+                    asbd: &localASBD,
+                    layoutSize: 0,
+                    layout: nil,
+                    magicCookieSize: magicCookie.count,
+                    magicCookie: cookiePointer,
+                    extensions: nil,
+                    formatDescriptionOut: &formatDescription
+                )
+            }
+        } else {
+            status = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &localASBD,
+                layoutSize: 0,
+                layout: nil,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &formatDescription
+            )
+        }
+
+        guard status == noErr else {
+            throw AudioPlayerError.status(status)
+        }
+
+        guard let formatDescription else {
+            throw AudioPlayerError.streamNotOpened
+        }
+
+        return formatDescription
     }
 
     private func withLock<T>(_ perform: () throws -> T) rethrows -> T {
